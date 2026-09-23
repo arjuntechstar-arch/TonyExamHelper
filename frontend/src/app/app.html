@@ -1,0 +1,12 @@
+<main class="shell">
+  <p class="eyebrow">AI examination studio</p>
+  <h1>Build grounded questions with confidence.</h1>
+  <p class="intro">The foundation is ready for syllabus-aware generation, review, and practice workflows.</p>
+  <section class="status" aria-live="polite">
+    <span class="status-dot" [class.online]="apiStatus() === 'online'" [class.offline]="apiStatus() === 'offline'"></span>
+    <div>
+      <strong>Platform status</strong>
+      <p>{{ apiMessage() }}</p>
+    </div>
+  </section>
+</main>
