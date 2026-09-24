@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = Field(default=30, ge=1, le=1440)
     max_upload_bytes: int = Field(default=20 * 1024 * 1024, ge=1)
+    llm_provider: str = "deterministic"
+    openai_api_key: str | None = None
+    openai_model: str = "gpt-4o-mini"
+    openrouter_api_key: str | None = None
+    openrouter_model: str = "openrouter/auto"
+    openrouter_app_name: str = "Atlas Exam Studio"
+    openrouter_timeout_seconds: int = Field(default=120, ge=10, le=300)
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[3] / ".env",

@@ -1,0 +1,33 @@
+version: "3.9"
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: ai-exam-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: ai-exam-backend
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+    ports:
+      - "8000:8000"
+    environment:
+      MONGODB_URL: mongodb://mongodb:27017/
+      MONGODB_DATABASE: ai_examination_studio
+      JWT_SECRET_KEY: replace-with-a-long-random-secret
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_MINUTES: 30
+    volumes:
+      - ./backend/storage:/app/backend/storage
+
+volumes:
+  mongodb_data:

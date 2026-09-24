@@ -1,12 +1,890 @@
-<main class="shell">
-  <p class="eyebrow">AI examination studio</p>
-  <h1>Build grounded questions with confidence.</h1>
-  <p class="intro">The foundation is ready for syllabus-aware generation, review, and practice workflows.</p>
-  <section class="status" aria-live="polite">
-    <span class="status-dot" [class.online]="apiStatus() === 'online'" [class.offline]="apiStatus() === 'offline'"></span>
-    <div>
-      <strong>Platform status</strong>
-      <p>{{ apiMessage() }}</p>
+<div class="app-frame">
+  <aside class="sidebar">
+    <div class="brand-mark">
+      <span>AE</span>
+      <div><strong>Atlas Exam</strong><small>Studio</small></div>
     </div>
-  </section>
-</main>
+    <div class="workspace-label">Faculty workspace</div>
+    <nav aria-label="Primary navigation">
+      @for (
+        item of [
+          'Overview',
+          'Generate',
+          'Question bank',
+          'Model papers',
+          'Materials',
+          'Analytics',
+          'Practice',
+        ];
+        track item
+      ) {
+        <button class="nav-item" [class.active]="activeView() === item" (click)="selectView(item)">
+          <span class="nav-icon">{{
+            item === 'Overview'
+              ? '⌂'
+              : item === 'Generate'
+                ? '✦'
+                : item === 'Question bank'
+                  ? '▤'
+                  : item === 'Model papers'
+                    ? '□'
+                    : item === 'Materials'
+                      ? '↥'
+                      : item === 'Analytics'
+                        ? '◌'
+                        : '✧'
+          }}</span
+          >{{ item }}
+        </button>
+      }
+    </nav>
+    <div class="sidebar-footer">
+      <div class="api-pill">
+        <span
+          class="status-dot"
+          [class.online]="apiStatus() === 'online'"
+          [class.offline]="apiStatus() === 'offline'"
+        ></span
+        ><span>{{
+          apiStatus() === 'online'
+            ? 'API connected'
+            : apiStatus() === 'checking'
+              ? 'Checking API'
+              : 'API offline'
+        }}</span>
+      </div>
+      @if (currentUser(); as user) {
+        <button class="profile" (click)="logout()">
+          <span class="avatar">{{ user.display_name.slice(0, 2).toUpperCase() }}</span
+          ><span
+            ><strong>{{ user.display_name }}</strong
+            ><small>{{ user.roles.join(' · ') }} · Sign out</small></span
+          ><span class="more">•••</span>
+        </button>
+      } @else {
+        <button class="profile" (click)="openLogin()">
+          <span class="avatar">?</span
+          ><span><strong>Guest preview</strong><small>Sign in to continue</small></span
+          ><span class="more">→</span>
+        </button>
+      }
+    </div>
+  </aside>
+
+  <main class="content">
+    <header class="content-header">
+      <div>
+        <p class="eyebrow">Thursday, 24 September 2026</p>
+        <h1>{{ activeView() }}</h1>
+      </div>
+      <div class="top-actions">
+        <button class="icon-button" aria-label="Notifications">
+          ♧<span class="notification-dot"></span></button
+        ><button class="outline-button" (click)="selectView('Materials')">＋ Add material</button>
+      </div>
+    </header>
+    @if (activeView() === 'Practice') {
+      <section class="practice-view">
+        <div class="practice-copy">
+          <p class="eyebrow">Student workspace</p>
+          <h2>{{ practiceState() === 'started' ? 'Stay curious.' : 'Practice with purpose.' }}</h2>
+          <p>
+            Build a focused question set from approved course content, then review explanations as
+            you learn.
+          </p>
+        </div>
+        @if (practiceState() === 'started' && currentPracticeQuestion(); as question) {
+          <div class="practice-card player-card">
+            <div class="progress-line">
+              <span>Question {{ practiceIndex() + 1 }} of {{ practiceQuestions().length }}</span
+              ><span>{{ question.difficulty }}</span>
+            </div>
+            <h3>{{ question.question_text }}</h3>
+            <div class="answer-list">
+              @for (option of question.options; track option.key) {
+                <button
+                  class="answer-option"
+                  [class.selected]="practiceAnswers()[question.question_id] === option.key"
+                  (click)="chooseAnswer(option.key)"
+                >
+                  <span>{{ option.key }}</span
+                  ><span>{{ option.text }}</span>
+                </button>
+              }
+            </div>
+            <div class="player-actions">
+              <button
+                class="text-button"
+                [disabled]="practiceIndex() === 0"
+                (click)="previousPracticeQuestion()"
+              >
+                ← Previous
+              </button>
+              @if (practiceIndex() < practiceQuestions().length - 1) {
+                <button class="start-button" (click)="nextPracticeQuestion()">
+                  Next <span>→</span>
+                </button>
+              } @else {
+                <button class="start-button" (click)="submitPractice()">
+                  Submit answers <span>→</span>
+                </button>
+              }
+            </div>
+            <p
+              class="practice-message"
+              [class.error]="practiceState() === 'error'"
+              [class.success]="practiceResult()"
+            >
+              {{ practiceMessage() }}
+            </p>
+            @if (practiceResult(); as result) {
+              <div class="result-summary">
+                <strong>{{ result.percentage }}%</strong
+                ><span>{{ result.correct_count }} / {{ result.total_questions }} correct</span>
+              </div>
+              @for (item of practiceQuestions(); track item.question_id) {
+                @if (resultFor(item.question_id); as answer) {
+                  <div class="explanation" [class.incorrect]="!answer.is_correct">
+                    <strong>{{ answer.is_correct ? 'Correct' : 'Review this answer' }}</strong>
+                    <p>{{ answer.explanation }}</p>
+                  </div>
+                }
+              }
+            }
+          </div>
+        } @else {
+          <div class="practice-card">
+            <label
+              >Subject<select
+                [ngModel]="practiceSubject()"
+                (ngModelChange)="practiceSubject.set($event)"
+              >
+                <option value="computer-science">Computer Science</option>
+                <option value="data-structures">Data Structures</option>
+                <option value="operating-systems">Operating Systems</option>
+              </select></label
+            ><label
+              >Questions<select
+                [ngModel]="practiceCount()"
+                (ngModelChange)="practiceCount.set(+$event)"
+              >
+                <option [value]="5">5 questions</option>
+                <option [value]="10">10 questions</option>
+                <option [value]="20">20 questions</option>
+              </select></label
+            ><label
+              >Difficulty<select
+                [ngModel]="practiceDifficulty()"
+                (ngModelChange)="practiceDifficulty.set($event)"
+              >
+                <option value="mixed">Mixed difficulty</option>
+                <option value="easy">Easy</option>
+                <option value="medium">Medium</option>
+                <option value="hard">Hard</option>
+              </select></label
+            ><button
+              class="start-button"
+              [disabled]="practiceState() === 'starting'"
+              (click)="startPractice()"
+            >
+              {{ practiceState() === 'starting' ? 'Preparing...' : 'Start practice' }}
+              <span>→</span>
+            </button>
+            <p class="practice-message" [class.error]="practiceState() === 'error'">
+              {{ practiceMessage() }}
+            </p>
+          </div>
+        }
+      </section>
+    } @else if (activeView() === 'Generate') {
+      <section class="generation-view">
+        <div class="generation-intro">
+          <p class="eyebrow">Faculty workspace</p>
+          <h2>Generate grounded questions.</h2>
+          <p>
+            Use retrieved study material as context, then review every candidate before it enters
+            the question bank.
+          </p>
+          <div class="source-note">
+            <span>01</span>
+            <p>
+              <strong>Model</strong><br />{{
+                generationState() === 'error' ? 'Needs attention' : 'Deterministic baseline'
+              }}
+            </p>
+          </div>
+        </div>
+        <div class="generation-panel">
+          <label
+            >Template ID<input
+              [ngModel]="generationTemplateId()"
+              (ngModelChange)="generationTemplateId.set($event)"
+              placeholder="Paste an active template ID" /></label
+          ><label
+            >Source query<textarea
+              [ngModel]="generationQuery()"
+              (ngModelChange)="generationQuery.set($event)"
+              placeholder="What should the questions test?"
+              rows="3"
+            ></textarea>
+          </label>
+          <div class="generation-fields">
+            <label
+              >Difficulty<select
+                [ngModel]="generationDifficulty()"
+                (ngModelChange)="generationDifficulty.set($event)"
+              >
+                <option>Easy</option>
+                <option>Medium</option>
+                <option>Hard</option>
+              </select></label
+            ><label
+              >Bloom<select
+                [ngModel]="generationBloom()"
+                (ngModelChange)="generationBloom.set($event)"
+              >
+                <option>Remember</option>
+                <option>Understand</option>
+                <option>Apply</option>
+                <option>Analyze</option>
+                <option>Evaluate</option>
+                <option>Create</option>
+              </select></label
+            ><label
+              >Candidates<select
+                [ngModel]="generationCount()"
+                (ngModelChange)="generationCount.set(+$event)"
+              >
+                <option [value]="1">1</option>
+                <option [value]="3">3</option>
+                <option [value]="5">5</option>
+              </select></label
+            >
+          </div>
+          <button
+            class="start-button"
+            [disabled]="generationState() === 'generating'"
+            (click)="generateQuestions()"
+          >
+            {{ generationState() === 'generating' ? 'Generating...' : 'Generate questions' }}
+            <span>→</span>
+          </button>
+          <p
+            class="practice-message"
+            [class.error]="generationState() === 'error'"
+            [class.success]="generationState() === 'done'"
+          >
+            {{ generationMessage() }}
+          </p>
+        </div>
+      </section>
+      <section class="generation-view">
+        <div class="generation-intro">
+          <p class="eyebrow">Faculty workspace</p>
+          <h2>Generate grounded questions.</h2>
+          <p>
+            Use retrieved study material as context, then review every candidate before it enters
+            the question bank.
+          </p>
+          <div class="source-note">
+            <span>01</span>
+            <p>
+              <strong>Model</strong><br />{{
+                generationState() === 'error' ? 'Needs attention' : 'Deterministic baseline'
+              }}
+            </p>
+          </div>
+        </div>
+        <div class="generation-panel">
+          <label
+            >Question template<select
+              [ngModel]="generationTemplateId()"
+              (ngModelChange)="generationTemplateId.set($event)"
+              [disabled]="templateState() !== 'loaded'"
+            >
+              <option value="" disabled>
+                {{
+                  templateState() === 'loading'
+                    ? 'Loading templates...'
+                    : templateState() === 'error'
+                      ? 'Sign in to load templates'
+                      : generationTemplates().length
+                        ? 'Select a template'
+                        : 'No active templates'
+                }}
+              </option>
+              @for (template of generationTemplates(); track template.id) {
+                <option [value]="template.id">{{ template.name }} · {{ template.pattern }}</option>
+              }
+            </select></label
+          ><label
+            >Source query<textarea
+              [ngModel]="generationQuery()"
+              (ngModelChange)="generationQuery.set($event)"
+              placeholder="What should the questions test?"
+              rows="3"
+            ></textarea>
+          </label>
+          <div class="generation-fields">
+            <label
+              >Difficulty<select
+                [ngModel]="generationDifficulty()"
+                (ngModelChange)="generationDifficulty.set($event)"
+              >
+                <option>Easy</option>
+                <option>Medium</option>
+                <option>Hard</option>
+              </select></label
+            ><label
+              >Bloom<select
+                [ngModel]="generationBloom()"
+                (ngModelChange)="generationBloom.set($event)"
+              >
+                <option>Remember</option>
+                <option>Understand</option>
+                <option>Apply</option>
+                <option>Analyze</option>
+                <option>Evaluate</option>
+                <option>Create</option>
+              </select></label
+            ><label
+              >Candidates<select
+                [ngModel]="generationCount()"
+                (ngModelChange)="generationCount.set(+$event)"
+              >
+                <option [value]="1">1</option>
+                <option [value]="3">3</option>
+                <option [value]="5">5</option>
+              </select></label
+            >
+          </div>
+          <button
+            class="start-button"
+            [disabled]="generationState() === 'generating' || !generationTemplateId()"
+            (click)="generateQuestions()"
+          >
+            {{ generationState() === 'generating' ? 'Generating...' : 'Generate questions' }}
+            <span>→</span>
+          </button>
+          <p
+            class="practice-message"
+            [class.error]="generationState() === 'error'"
+            [class.success]="generationState() === 'done'"
+          >
+            {{ generationMessage() }}
+          </p>
+        </div>
+      </section>
+      @if (generatedQuestions().length) {
+        <section class="candidate-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Human review required</p>
+              <h2>Candidate questions</h2>
+            </div>
+            <span class="term-badge">DRAFTS</span>
+          </div>
+          <div class="candidate-list">
+            @for (question of generatedQuestions(); track question.question_text) {
+              <article class="candidate-card">
+                <span class="metric-label"
+                  >{{ question.difficulty }} · {{ question.bloom_level }}</span
+                >
+                <h3>{{ question.question_text }}</h3>
+                <div class="candidate-options">
+                  @for (option of question.options; track option.key) {
+                    <span
+                      ><b>{{ option.key }}</b
+                      >{{ option.text }}</span
+                    >
+                  }
+                </div>
+                <p>{{ question.explanation }}</p>
+                <button
+                  class="outline-button"
+                  [disabled]="generationState() === 'saving'"
+                  (click)="saveGeneratedQuestion(question)"
+                >
+                  Save as draft
+                </button>
+              </article>
+            }
+          </div>
+        </section>
+      }
+    } @else if (activeView() === 'Materials') {
+      <section class="operations-view">
+        <div class="operations-intro">
+          <p class="eyebrow">Faculty workspace</p>
+          <h2>Keep sources current.</h2>
+          <p>
+            Upload source material, process it into retrieval chunks, and make it available to
+            grounded generation.
+          </p>
+        </div>
+        <div class="operations-panel">
+          <label
+            >Subject<select
+              [value]="materialSubject()"
+              (change)="selectMaterialSubject($any($event.target).value)"
+              [disabled]="subjectState() === 'loading'"
+            >
+              <option value="" disabled>
+                {{
+                  subjectState() === 'loading'
+                    ? 'Loading subjects...'
+                    : subjects().length
+                      ? 'Select a subject'
+                      : 'No subjects yet'
+                }}
+              </option>
+              @for (subject of subjects(); track subject.id) {
+                <option [value]="subject.id" [selected]="subject.id === materialSubject()">{{
+                  subject.code
+                }} · {{ subject.name }}</option>
+              }
+            </select></label
+          >
+          @if (subjectState() !== 'error') {
+            <div class="subject-create">
+              <span class="metric-label">Add a new subject</span
+              ><input
+                [ngModel]="subjectCode()"
+                (ngModelChange)="subjectCode.set($event)"
+                placeholder="Code e.g. CS101"
+              /><input
+                [ngModel]="subjectName()"
+                (ngModelChange)="subjectName.set($event)"
+                placeholder="Name e.g. Computer Science"
+              /><button
+                class="outline-button"
+                [disabled]="subjectState() === 'creating'"
+                (click)="createSubject()"
+              >
+                {{ subjectState() === 'creating' ? 'Creating...' : 'Create subject' }}
+              </button>
+            </div>
+          }
+          <p class="practice-message" [class.error]="subjectState() === 'error'">
+            {{ subjectMessage() }}
+          </p>
+          <label class="file-field"
+            >Study material<input
+              type="file"
+              accept=".pdf,.docx,.pptx,.txt"
+              (change)="selectMaterialFile($event)"
+            /><small>{{
+              materialFile()?.name || 'Choose a PDF, DOCX, PPTX, or TXT file'
+            }}</small></label
+          ><button
+            class="start-button"
+            [disabled]="
+              materialState() === 'uploading' ||
+              materialState() === 'processing' ||
+              !materialSubject() ||
+              !materialFile() ||
+              materialFileState() !== 'ready'
+            "
+            (click)="uploadMaterial()"
+          >
+            {{
+              materialState() === 'uploading'
+                ? 'Uploading...'
+                : materialState() === 'processing'
+                  ? 'Processing...'
+                  : 'Upload and process'
+            }}
+            <span>→</span>
+          </button>
+          <div class="upload-readiness">
+            <span [class.ready-check]="!!materialSubject()">{{ materialSubject() ? '✓ Subject selected' : '○ Select a subject' }}</span>
+            <span [class.ready-check]="materialFileState() === 'ready'">{{
+              materialFileState() === 'checking'
+                ? '◌ Preparing file...'
+                : materialFileState() === 'ready'
+                  ? '✓ File ready'
+                  : '○ Choose a file'
+            }}</span>
+          </div>
+          <div class="material-progress" aria-live="polite">
+            <div class="progress-heading">
+              <span>{{
+                materialStage() === 'idle'
+                  ? 'Ready to start'
+                  : materialStage() === 'validating'
+                    ? 'Validating file'
+                    : materialStage() === 'uploading'
+                      ? 'Uploading file'
+                      : materialStage() === 'extracting'
+                        ? 'Extracting text'
+                        : materialStage() === 'chunking'
+                          ? 'Creating retrieval chunks'
+                          : materialStage() === 'complete'
+                            ? 'Processing complete'
+                            : 'Processing failed'
+              }}</span
+              ><strong>{{ materialProgress() }}%</strong>
+            </div>
+            <div class="progress-track"><span [style.width.%]="materialProgress()"></span></div>
+            @if (materialState() === 'uploading' || materialState() === 'processing') {
+              <ol class="process-steps">
+                <li
+                  [class.active]="
+                    materialStage() === 'validating' || materialStage() === 'uploading'
+                  "
+                  [class.done]="materialProgress() > 20"
+                >
+                  Upload file
+                </li>
+                <li
+                  [class.active]="materialStage() === 'extracting'"
+                  [class.done]="materialProgress() > 55"
+                >
+                  Extract text
+                </li>
+                <li
+                  [class.active]="materialStage() === 'chunking'"
+                  [class.done]="materialProgress() === 100"
+                >
+                  Create chunks
+                </li>
+                <li [class.done]="materialStage() === 'complete'">Save metadata</li>
+              </ol>
+            }
+            <p
+              class="practice-message"
+              [class.error]="materialState() === 'error'"
+              [class.success]="materialState() === 'done'"
+            >
+              {{ materialMessage() }}
+            </p>
+            @if (materialError()) {
+              <p class="material-error"><strong>Error:</strong> {{ materialError() }}</p>
+            }
+          </div>
+        </div>
+      </section>
+      @if (uploadedMaterial(); as material) {
+        <section class="status-strip">
+          <strong>{{ material.filename }}</strong
+          ><span>{{ material.status }} · {{ material.size_bytes }} bytes</span>
+        </section>
+      }
+    } @else if (activeView() === 'Question bank') {
+      <section class="review-view">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Faculty workspace</p>
+            <h2>Review question drafts</h2>
+          </div>
+          <button class="outline-button" (click)="loadReviewQuestions()">Refresh</button>
+        </div>
+        <p class="practice-message" [class.error]="reviewState() === 'error'">
+          {{ reviewMessage() }}
+        </p>
+        <div class="review-list">
+          @for (question of reviewQuestions(); track question.id) {
+            <article class="review-card">
+              <span class="metric-label"
+                >{{ question.difficulty }} · {{ question.bloom_level }}</span
+              >
+              <h3>{{ question.question_text }}</h3>
+              <div class="candidate-options">
+                @for (option of question.options; track option.key) {
+                  <span
+                    ><b>{{ option.key }}</b
+                    >{{ option.text }}</span
+                  >
+                }
+              </div>
+              <p>{{ question.explanation }}</p>
+              <div class="review-actions">
+                <button
+                  class="outline-button reject-button"
+                  (click)="reviewQuestion(question, 'reject')"
+                >
+                  Reject</button
+                ><button class="start-button" (click)="reviewQuestion(question, 'approve')">
+                  Approve <span>→</span>
+                </button>
+              </div>
+            </article>
+          }
+          @if (reviewState() === 'ready' && !reviewQuestions().length) {
+            <div class="empty-state">No draft questions are waiting for review.</div>
+          }
+        </div>
+      </section>
+      <section class="bank-builder">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Approved content</p>
+            <h2>Build a question bank</h2>
+          </div>
+          <button class="outline-button" (click)="loadApprovedQuestions()">Load approved</button>
+        </div>
+        <div class="bank-builder-grid">
+          <div class="bank-form">
+            <label
+              >Bank name<input
+                [ngModel]="bankName()"
+                (ngModelChange)="bankName.set($event)" /></label
+            ><label
+              >Subject ID<input
+                [ngModel]="bankSubject()"
+                (ngModelChange)="bankSubject.set($event)"
+                placeholder="Subject ID shared by selected questions" /></label
+            ><button
+              class="start-button"
+              [disabled]="bankCreateState() === 'creating'"
+              (click)="createQuestionBank()"
+            >
+              {{ bankCreateState() === 'creating' ? 'Creating...' : 'Create and approve bank' }}
+              <span>→</span>
+            </button>
+            <p
+              class="practice-message"
+              [class.error]="bankCreateState() === 'error'"
+              [class.success]="bankCreateState() === 'done'"
+            >
+              {{ bankMessage() }}
+            </p>
+          </div>
+          <div class="approved-picker">
+            @for (question of approvedQuestions(); track question.id) {
+              <button
+                class="picker-item"
+                [class.selected]="selectedQuestionIds().includes(question.id)"
+                (click)="toggleQuestion(question)"
+              >
+                <span class="picker-check">{{
+                  selectedQuestionIds().includes(question.id) ? '✓' : '+'
+                }}</span
+                ><span
+                  ><strong>{{ question.question_text }}</strong
+                  ><small>{{ question.difficulty }} · {{ question.subject_id }}</small></span
+                >
+              </button>
+            }
+            @if (bankCreateState() === 'ready' && !approvedQuestions().length) {
+              <div class="empty-state">Load approved questions to begin.</div>
+            }
+          </div>
+        </div>
+      </section>
+    } @else if (activeView() === 'Model papers') {
+      <section class="paper-view">
+        <div class="paper-intro">
+          <p class="eyebrow">Faculty workspace</p>
+          <h2>Compose the examination.</h2>
+          <p>
+            Turn an approved question bank into a balanced paper, then publish it when the blueprint
+            is ready.
+          </p>
+          <div class="source-note">
+            <span>02</span>
+            <p>
+              <strong>Publication</strong><br />{{ modelPaper()?.publication_status || 'Draft' }}
+            </p>
+          </div>
+        </div>
+        <div class="paper-panel">
+          <label
+            >Paper name<input
+              [ngModel]="paperName()"
+              (ngModelChange)="paperName.set($event)" /></label
+          ><label
+            >Approved question bank<select
+              [ngModel]="paperBankId()"
+              (ngModelChange)="selectPaperBank($event)"
+              [disabled]="bankState() !== 'ready'"
+            >
+              <option value="" disabled>
+                {{
+                  bankState() === 'loading'
+                    ? 'Loading banks...'
+                    : bankState() === 'error'
+                      ? 'Sign in to load banks'
+                      : questionBanks().length
+                        ? 'Select an approved bank'
+                        : 'No approved banks'
+                }}
+              </option>
+              @for (bank of questionBanks(); track bank.id) {
+                <option [value]="bank.id">
+                  {{ bank.name }} · {{ bank.question_ids.length }} questions
+                </option>
+              }
+            </select></label
+          ><label
+            >Question count<select
+              [ngModel]="paperCount()"
+              (ngModelChange)="paperCount.set(+$event)"
+            >
+              <option [value]="5">5 questions</option>
+              <option [value]="10">10 questions</option>
+              <option [value]="20">20 questions</option>
+            </select></label
+          ><button
+            class="start-button"
+            [disabled]="paperState() === 'creating' || !paperBankId()"
+            (click)="createModelPaper()"
+          >
+            {{ paperState() === 'creating' ? 'Creating...' : 'Create model paper' }} <span>→</span>
+          </button>
+          <p
+            class="practice-message"
+            [class.error]="paperState() === 'error'"
+            [class.success]="paperState() === 'done'"
+          >
+            {{ paperMessage() }}
+          </p>
+          @if (modelPaper(); as paper) {
+            <div class="paper-result">
+              <strong>{{ paper.name }}</strong
+              ><span>{{ paper.question_count }} questions · {{ paper.publication_status }}</span>
+              @if (paper.publication_status === 'draft') {
+                <button
+                  class="outline-button"
+                  [disabled]="paperState() === 'publishing'"
+                  (click)="publishModelPaper()"
+                >
+                  {{ paperState() === 'publishing' ? 'Publishing...' : 'Publish paper' }}
+                </button>
+              }
+            </div>
+          }
+        </div>
+      </section>
+    } @else {
+      <section class="welcome-row">
+        <div>
+          <h2>Good morning, Dr. Rao.</h2>
+          <p>{{ apiMessage() }} Your assessment workspace is ready.</p>
+        </div>
+        <span class="term-badge">AUTUMN 2026 <b>•</b> TERM 1</span>
+      </section>
+      <section class="metrics" aria-label="Workspace summary">
+        <article class="metric-card accent-teal">
+          <span class="metric-label">Questions generated</span><strong>1,248</strong
+          ><span class="trend positive">↗ 18.4% <em>vs last month</em></span>
+          <div class="sparkline teal"></div>
+        </article>
+        <article class="metric-card accent-coral">
+          <span class="metric-label">Awaiting review</span><strong>86</strong
+          ><span class="trend neutral">14 <em>due this week</em></span>
+          <div class="sparkline coral"></div>
+        </article>
+        <article class="metric-card accent-gold">
+          <span class="metric-label">Published papers</span><strong>24</strong
+          ><span class="trend positive">↗ 6.2% <em>vs last month</em></span>
+          <div class="sparkline gold"></div>
+        </article>
+      </section>
+      <section class="dashboard-grid">
+        <article class="panel workflow-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Continue where you left off</p>
+              <h2>Assessment workflow</h2>
+            </div>
+            <button class="text-button">View all <span>→</span></button>
+          </div>
+          <div class="workflow-list">
+            <button class="workflow-item" (click)="selectView('Question bank')">
+              <span class="workflow-number">01</span
+              ><span
+                ><strong>Review generated questions</strong
+                ><small>86 questions are waiting for your decision</small></span
+              ><span class="workflow-arrow">→</span></button
+            ><button class="workflow-item" (click)="selectView('Model papers')">
+              <span class="workflow-number">02</span
+              ><span
+                ><strong>Build a model paper</strong
+                ><small>Use approved questions from 3 subject banks</small></span
+              ><span class="workflow-arrow">→</span></button
+            ><button class="workflow-item" (click)="selectView('Materials')">
+              <span class="workflow-number">03</span
+              ><span
+                ><strong>Upload study material</strong
+                ><small>Keep your source library current</small></span
+              ><span class="workflow-arrow">→</span>
+            </button>
+          </div>
+        </article>
+        <article class="panel activity-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Recent activity</p>
+              <h2>Latest updates</h2>
+            </div>
+            <button class="text-button">See history <span>→</span></button>
+          </div>
+          <div class="activity-list">
+            <div class="activity">
+              <span class="activity-icon green">✓</span
+              ><span
+                ><strong>Model paper published</strong
+                ><small>Data Structures · Midterm examination</small></span
+              ><time>2h ago</time>
+            </div>
+            <div class="activity">
+              <span class="activity-icon blue">↥</span
+              ><span
+                ><strong>Material processed</strong><small>Operating Systems / Unit 04</small></span
+              ><time>Yesterday</time>
+            </div>
+            <div class="activity">
+              <span class="activity-icon orange">✦</span
+              ><span
+                ><strong>Question set generated</strong
+                ><small>Computer Networks · 40 questions</small></span
+              ><time>2d ago</time>
+            </div>
+          </div>
+        </article>
+      </section>
+    }
+  </main>
+</div>
+@if (loginOpen()) {
+  <div class="dialog-backdrop" role="presentation" (click)="closeLogin()">
+    <section
+      class="login-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="login-title"
+      (click)="$event.stopPropagation()"
+    >
+      <button class="dialog-close" aria-label="Close sign in" (click)="closeLogin()">×</button>
+      <p class="eyebrow">Secure access</p>
+      <h2 id="login-title">Welcome back.</h2>
+      <p class="dialog-copy">Sign in to start practice sessions and access your workspace.</p>
+      <form (ngSubmit)="submitLogin()">
+        <label
+          >Email<input
+            type="email"
+            [ngModel]="loginEmail()"
+            (ngModelChange)="loginEmail.set($event)"
+            name="email"
+            required
+            autocomplete="email" /></label
+        ><label
+          >Password<input
+            type="password"
+            [ngModel]="loginPassword()"
+            (ngModelChange)="loginPassword.set($event)"
+            name="password"
+            required
+            minlength="8"
+            autocomplete="current-password" /></label
+        ><button class="start-button" type="submit" [disabled]="loginState() === 'submitting'">
+          {{ loginState() === 'submitting' ? 'Signing in...' : 'Sign in' }} <span>→</span>
+        </button>
+        @if (loginMessage()) {
+          <p class="practice-message error">{{ loginMessage() }}</p>
+        }
+      </form>
+    </section>
+  </div>
+}

@@ -1,3 +1,31 @@
-from app.models.documents import CourseDocument, DocumentChunkDocument, ModelPaperDocument, PracticeTestDocument, QuestionBankDocument, QuestionDocument, QuestionTemplateDocument, StudyMaterialDocument, SubjectDocument, SyllabusDocument, SyllabusTopicDocument, UserDocument
+from app.models.documents import (
+    CourseDocument,
+    DocumentChunkDocument,
+    ModelPaperDocument,
+    PracticeTestDocument,
+    QuestionBankDocument,
+    QuestionDocument,
+    QuestionTemplateDocument,
+    StudentAnswerDocument,
+    StudyMaterialDocument,
+    SubjectDocument,
+    SyllabusDocument,
+    SyllabusTopicDocument,
+    UserDocument,
+)
 
-__all__ = ["UserDocument", "SubjectDocument", "CourseDocument", "SyllabusDocument", "SyllabusTopicDocument", "StudyMaterialDocument", "DocumentChunkDocument", "QuestionTemplateDocument", "QuestionDocument", "QuestionBankDocument", "ModelPaperDocument", "PracticeTestDocument"]
+__all__ = [
+    "UserDocument",
+    "SubjectDocument",
+    "CourseDocument",
+    "SyllabusDocument",
+    "SyllabusTopicDocument",
+    "StudyMaterialDocument",
+    "DocumentChunkDocument",
+    "QuestionTemplateDocument",
+    "QuestionDocument",
+    "QuestionBankDocument",
+    "ModelPaperDocument",
+    "PracticeTestDocument",
+    "StudentAnswerDocument",
+]

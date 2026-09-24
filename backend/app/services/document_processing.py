@@ -72,14 +72,18 @@ class DocumentProcessingService:
         topic_id: str | None = None,
     ) -> StudyMaterialDocument:
         extension = self._validate_upload(filename, content_type, content)
-        if not self.database.subjects.find_one({"_id": subject_id}):
+        subject = self.database.subjects.find_one({"_id": subject_id})
+        if subject is None:
+            subject = self.database.subjects.find_one({"code": subject_id.upper()})
+        if subject is None:
             raise DocumentProcessingError("Subject not found.")
+        resolved_subject_id = str(subject["_id"])
 
         storage_key = f"{uuid4()}.{extension}"
         self.storage_path.mkdir(parents=True, exist_ok=True)
         (self.storage_path / storage_key).write_bytes(content)
         material = StudyMaterialDocument(
-            subject_id=subject_id,
+            subject_id=resolved_subject_id,
             course_id=course_id,
             syllabus_id=syllabus_id,
             topic_id=topic_id,
@@ -103,7 +107,7 @@ class DocumentProcessingService:
         try:
             pages = extract_pages(material.filename, path.read_bytes())
             chunks = chunk_pages(pages)
-        except (UnicodeDecodeError, ValueError, OSError) as error:
+        except Exception as error:
             self.database.study_materials.update_one({"_id": material.id}, {"$set": {"status": "failed"}})
             raise DocumentProcessingError("The material could not be processed.") from error
 

@@ -116,4 +116,25 @@ class ModelPaperDocument(AuditDocument):
 class PracticeTestDocument(AuditDocument):
     student_id: str
     subject_id: str
+    topic_id: str | None = None
+    question_ids: list[str] = Field(default_factory=list)
+    question_count: int = Field(ge=1)
+    duration_minutes: int = Field(default=30, ge=1)
+    difficulty: str | None = None
     status: str = "started"
+    score: float = 0.0
+    correct_count: int = 0
+    total_questions: int = 0
+    percentage: float = 0.0
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class StudentAnswerDocument(AuditDocument):
+    practice_test_id: str
+    question_id: str
+    selected_answer: str | None = None
+    is_correct: bool = False
+    score: int = 0
+    explanation: str | None = None
+    submitted_at: datetime | None = None

@@ -50,6 +50,17 @@ def test_upload_rejects_mismatched_content_type(document_service: DocumentProces
         )
 
 
+def test_upload_resolves_subject_code_to_subject_id(document_service: DocumentProcessingService) -> None:
+    material = document_service.upload(
+        subject_id="cs101",
+        filename="notes.txt",
+        content_type="text/plain",
+        content=b"notes",
+    )
+
+    assert material.subject_id == "subject-1"
+
+
 def test_upload_rejects_files_over_configured_limit(document_service: DocumentProcessingService) -> None:
     with pytest.raises(DocumentProcessingError, match="too large"):
         document_service.upload(

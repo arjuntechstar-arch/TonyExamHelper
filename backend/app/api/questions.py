@@ -4,8 +4,9 @@ from pymongo.database import Database
 
 from app.api.auth import require_roles
 from app.core.database import get_database
+from app.core.config import get_settings
 from app.models import QuestionDocument, QuestionTemplateDocument, UserDocument
-from app.services.generation import GeneratedQuestion, GenerationError, GenerationService
+from app.services.generation import GeneratedQuestion, GenerationError, GenerationService, OpenAICompatibleProvider, OpenRouterProvider
 from app.services.quality import QuestionQualityService, ValidationResult
 from app.services.retrieval import RetrievalService
 
@@ -61,7 +62,13 @@ def generate_questions(payload: GenerateRequest, database: Database) -> list[Gen
         topic_id=payload.topic_id,
     )
     try:
-        return GenerationService().generate(
+        settings = get_settings()
+        provider = None
+        if settings.llm_provider.lower() == "openrouter" and settings.openrouter_api_key:
+            provider = OpenRouterProvider(settings.openrouter_api_key, settings.openrouter_model, settings.openrouter_app_name, settings.openrouter_timeout_seconds)
+        elif settings.llm_provider.lower() == "openai" and settings.openai_api_key:
+            provider = OpenAICompatibleProvider(settings.openai_api_key, settings.openai_model)
+        return GenerationService(provider=provider).generate(
             template=template,
             chunks=chunks,
             difficulty=payload.difficulty,
