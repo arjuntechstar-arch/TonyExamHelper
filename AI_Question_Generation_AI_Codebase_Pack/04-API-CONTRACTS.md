@@ -15,6 +15,9 @@ POST /materials/upload
 POST /materials/{id}/process
 GET /materials/{id}/status
 
+POST /retrieval/materials/{id}/index
+POST /retrieval/search
+
 GET /templates
 POST /templates
 PUT /templates/{id}

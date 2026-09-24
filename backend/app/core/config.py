@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     mongodb_url: str = "mongodb://localhost:27017/"
     mongodb_database: str = "ai_examination_studio"
+    material_storage_path: Path = Path("storage/materials")
     jwt_secret_key: str | None = None
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = Field(default=30, ge=1, le=1440)

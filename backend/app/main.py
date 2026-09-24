@@ -11,6 +11,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.health import router as health_router
 from app.api.auth import router as auth_router
 from app.api.academic import router as academic_router
+from app.api.materials import router as materials_router
+from app.api.retrieval import router as retrieval_router
+from app.api.templates import router as templates_router
+from app.api.questions import router as questions_router
 from app.api.errors import ErrorResponse
 from app.core.config import get_settings
 from app.core.logging import configure_logging, correlation_id
@@ -51,6 +55,10 @@ async def request_context(request: Request, call_next):
 app.include_router(health_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(academic_router, prefix=settings.api_prefix)
+app.include_router(materials_router, prefix=settings.api_prefix)
+app.include_router(retrieval_router, prefix=settings.api_prefix)
+app.include_router(templates_router, prefix=settings.api_prefix)
+app.include_router(questions_router, prefix=settings.api_prefix)
 
 
 def error_response(

@@ -11,6 +11,8 @@ def ensure_indexes(database: Database) -> None:
     database.syllabus_topics.create_index("syllabus_id")
     database.study_materials.create_index("subject_id")
     database.document_chunks.create_index([("study_material_id", ASCENDING), ("chunk_index", ASCENDING)], unique=True)
+    database.document_chunks.create_index([("metadata.subject_id", ASCENDING), ("embedding_model", ASCENDING)])
+    database.question_templates.create_index([("name", ASCENDING), ("version", ASCENDING)], unique=True)
     database.questions.create_index([("syllabus_topic_id", ASCENDING), ("status", ASCENDING)])
     database.question_options.create_index([("question_id", ASCENDING), ("option_key", ASCENDING)], unique=True)
     database.practice_tests.create_index([("student_id", ASCENDING), ("status", ASCENDING)])

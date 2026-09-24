@@ -47,9 +47,34 @@ class SyllabusTopicDocument(AuditDocument):
 
 class StudyMaterialDocument(AuditDocument):
     subject_id: str
+    course_id: str | None = None
+    syllabus_id: str | None = None
+    topic_id: str | None = None
     filename: str
     storage_key: str
     content_type: str
+    size_bytes: int = Field(ge=0)
+    status: str = "uploaded"
+
+
+class DocumentChunkDocument(AuditDocument):
+    study_material_id: str
+    chunk_index: int = Field(ge=0)
+    page_number: int = Field(ge=1)
+    content: str
+    metadata: dict[str, str | int] = Field(default_factory=dict)
+    embedding: list[float] | None = None
+    embedding_model: str | None = None
+
+
+class QuestionTemplateDocument(AuditDocument):
+    name: str = Field(min_length=1, max_length=150)
+    question_type: str = Field(min_length=1, max_length=30)
+    pattern: str = Field(min_length=1, max_length=100)
+    required_fields: list[str] = Field(min_length=1)
+    supported_difficulties: list[str] = Field(min_length=1)
+    supported_bloom_levels: list[str] = Field(min_length=1)
+    version: str = Field(min_length=1, max_length=30)
 
 
 class QuestionDocument(AuditDocument):
