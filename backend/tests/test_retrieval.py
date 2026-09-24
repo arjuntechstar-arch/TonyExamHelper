@@ -73,3 +73,13 @@ def test_retrieval_filters_out_chunks_from_other_subjects(retrieval_service: Ret
 
     assert len(results) == 2
     assert all(result["chunk"].metadata["subject_id"] == "subject-1" for result in results)
+
+
+def test_indexing_accepts_material_documents_with_id_field(retrieval_service: RetrievalService) -> None:
+    material = next(retrieval_service.database.study_materials.find())
+    retrieval_service.database.study_materials.delete_many({})
+    material["id"] = material.pop("_id")
+    retrieval_service.database.study_materials.insert_one(material)
+
+    assert retrieval_service.index_material(material["id"]) == 3
+    assert retrieval_service.database.study_materials.find_one({"id": material["id"]})["status"] == "indexed"

@@ -8,6 +8,7 @@ from app.models import CourseDocument, SubjectDocument, SyllabusDocument, Syllab
 
 router = APIRouter(tags=["academics"])
 AcademicUser = Depends(require_roles("admin", "faculty"))
+AcademicReadUser = Depends(require_roles("student", "admin", "faculty"))
 
 
 class SubjectCreate(BaseModel):
@@ -41,7 +42,7 @@ def create_subject(payload: SubjectCreate, database: Database = Depends(get_data
 
 
 @router.get("/subjects", response_model=list[SubjectDocument])
-def list_subjects(database: Database = Depends(get_database), _: object = AcademicUser) -> list[SubjectDocument]:
+def list_subjects(database: Database = Depends(get_database), _: object = AcademicReadUser) -> list[SubjectDocument]:
     return [SubjectDocument.model_validate(item) for item in database.subjects.find().sort("code")]
 
 

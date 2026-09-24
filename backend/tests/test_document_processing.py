@@ -74,3 +74,23 @@ def test_upload_rejects_files_over_configured_limit(document_service: DocumentPr
 def test_chunk_pages_rejects_invalid_overlap() -> None:
     with pytest.raises(ValueError, match="overlap"):
         chunk_pages([(1, "content")], chunk_size=100, overlap=100)
+
+
+def test_status_reports_indexed_chunks_and_embedding_model(document_service: DocumentProcessingService) -> None:
+    material = document_service.upload(
+        subject_id="subject-1",
+        filename="notes.txt",
+        content_type="text/plain",
+        content=b"notes",
+    )
+    document_service.process(material.id)
+    document_service.database.document_chunks.update_many(
+        {"study_material_id": material.id},
+        {"$set": {"embedding": [1.0, 0.0], "embedding_model": "hash-embedding-v1"}},
+    )
+
+    result = document_service.get_status(material.id)
+
+    assert result["chunk_count"] == 1
+    assert result["indexed_chunk_count"] == 1
+    assert result["embedding_model"] == "hash-embedding-v1"

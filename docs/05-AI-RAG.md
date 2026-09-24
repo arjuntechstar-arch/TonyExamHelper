@@ -31,6 +31,18 @@ Example output:
 }
 ```
 
+Generation graph:
+1. `RetrievalService` is the RAG tool boundary and supplies ranked, page-aware chunks.
+2. `QuestionPreparingAgent` asks the configured LLM for a teacher-written structured candidate.
+3. `PatternValidationAgent` checks the exact template type, pattern, required fields, options and answer key.
+4. `QuestionValidationAgent` checks source relevance, difficulty, Bloom level, completeness and semantic duplication.
+5. The graph retries failed candidates with a different candidate context and only returns accepted questions.
+
+The orchestration is intentionally LangGraph-shaped (state passed through prepare → pattern → quality nodes)
+and the retrieval/generation boundaries are MCP-tool-compatible, while the baseline installation remains
+offline-capable and does not require LangChain or LangGraph packages. Hosted providers can be substituted
+without changing the graph or API contract.
+
 Validation pipeline:
 schema → correctness → relevance → syllabus → pattern → difficulty → Bloom → distractors → similarity → ranking → human approval.
 

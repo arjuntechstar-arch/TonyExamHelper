@@ -12,11 +12,23 @@ interface HealthResponse {
 
 interface QuestionTemplate {
   id: string;
+  _id?: string;
   name: string;
   question_type: string;
   pattern: string;
   supported_difficulties: string[];
   supported_bloom_levels: string[];
+  required_fields?: string[];
+  marks?: number;
+  sections?: PatternSection[];
+  total_marks?: number;
+}
+
+interface PatternSection {
+  question_type: string;
+  pattern: string;
+  count: number;
+  marks: number;
 }
 
 interface UserResponse {
@@ -65,10 +77,14 @@ interface GeneratedQuestion {
   difficulty: string;
   bloom_level: string;
   sources: { chunk_id: string; page: number }[];
+  marks?: number;
+  question_type?: string;
+  pattern?: string;
 }
 
 interface ReviewQuestion {
   id: string;
+  _id?: string;
   question_text: string;
   options: { key: string; text: string }[];
   correct_answer: string | null;
@@ -85,6 +101,7 @@ interface ApprovedQuestion extends ReviewQuestion {
 
 interface MaterialResponse {
   id: string;
+  _id?: string;
   filename: string;
   status: string;
   size_bytes: number;
@@ -92,12 +109,14 @@ interface MaterialResponse {
 
 interface Subject {
   id: string;
+  _id?: string;
   code: string;
   name: string;
 }
 
 interface QuestionBank {
   id: string;
+  _id?: string;
   name: string;
   subject_id: string;
   question_ids: string[];
@@ -106,12 +125,38 @@ interface QuestionBank {
 
 interface ModelPaper {
   id: string;
+  _id?: string;
   name: string;
   subject_id: string;
   question_bank_id: string;
   question_ids: string[];
   question_count: number;
   publication_status: string;
+}
+
+interface StudentAnalytics {
+  student_id: string;
+  total_attempts: number;
+  total_questions: number;
+  correct_answers: number;
+  average_percentage: number;
+  weak_topics: { topic_id: string; accuracy: number; attempts: number; correct_answers: number }[];
+}
+
+interface AnalyticsBreakdown {
+  topic_id?: string;
+  difficulty?: string;
+  attempts: number;
+  correct_answers: number;
+  accuracy: number;
+}
+
+function normalizeQuestion<T extends { id: string; _id?: string }>(question: T): T {
+  return { ...question, id: question.id || question._id || '' };
+}
+
+function normalizeId<T extends { id: string; _id?: string }>(item: T): T {
+  return { ...item, id: item.id || item._id || '' };
 }
 
 @Component({
@@ -150,13 +195,20 @@ export class App {
   protected readonly generationCount = signal(3);
   protected readonly generatedQuestions = signal<GeneratedQuestion[]>([]);
   protected readonly generationMessage = signal(
-    'Configure a template and source query to generate grounded questions.',
+    'Upload and index a book, select a paper pattern, choose difficulty, then generate.',
   );
   protected readonly generationState = signal<'ready' | 'generating' | 'saving' | 'done' | 'error'>(
     'ready',
   );
   protected readonly generationTemplates = signal<QuestionTemplate[]>([]);
   protected readonly templateState = signal<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  protected readonly patternName = signal('');
+  protected readonly patternTotalMarks = signal(10);
+  protected readonly patternSections = signal<PatternSection[]>([
+    { question_type: 'MCQ', pattern: 'Direct Concept', count: 10, marks: 1 },
+  ]);
+  protected readonly patternState = signal<'ready' | 'saving' | 'done' | 'error'>('ready');
+  protected readonly patternMessage = signal('Create a pattern before generating questions.');
   protected readonly reviewQuestions = signal<ReviewQuestion[]>([]);
   protected readonly reviewState = signal<'idle' | 'loading' | 'ready' | 'error'>('idle');
   protected readonly reviewMessage = signal('Review draft questions before adding them to a bank.');
@@ -178,7 +230,7 @@ export class App {
   protected readonly materialError = signal('');
   protected readonly materialProgress = signal(0);
   protected readonly materialStage = signal<
-    'idle' | 'validating' | 'uploading' | 'extracting' | 'chunking' | 'complete' | 'failed'
+    'idle' | 'validating' | 'uploading' | 'extracting' | 'chunking' | 'indexing' | 'complete' | 'failed'
   >('idle');
   protected readonly uploadedMaterial = signal<MaterialResponse | null>(null);
   protected readonly subjects = signal<Subject[]>([]);
@@ -186,6 +238,11 @@ export class App {
   protected readonly subjectName = signal('');
   protected readonly subjectState = signal<'idle' | 'loading' | 'creating' | 'error'>('idle');
   protected readonly subjectMessage = signal('No subjects found. Create one to upload material.');
+  protected readonly dashboardState = signal<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  protected readonly dashboardMessage = signal('Your workspace summary is loading.');
+  protected readonly dashboardDraftCount = signal(0);
+  protected readonly dashboardBankCount = signal(0);
+  protected readonly dashboardPracticeScore = signal<number | null>(null);
   protected readonly questionBanks = signal<QuestionBank[]>([]);
   protected readonly bankState = signal<'idle' | 'loading' | 'ready' | 'error'>('idle');
   protected readonly paperName = signal('Midterm assessment');
@@ -199,6 +256,11 @@ export class App {
     'Select an approved question bank to create a model paper.',
   );
   protected readonly modelPaper = signal<ModelPaper | null>(null);
+  protected readonly analyticsState = signal<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  protected readonly analyticsMessage = signal('Sign in to view practice performance.');
+  protected readonly studentAnalytics = signal<StudentAnalytics | null>(null);
+  protected readonly topicAnalytics = signal<AnalyticsBreakdown[]>([]);
+  protected readonly difficultyAnalytics = signal<AnalyticsBreakdown[]>([]);
 
   constructor() {
     void this.checkApiHealth();
@@ -215,9 +277,8 @@ export class App {
         this.http.get<UserResponse>('/api/auth/me', { headers: this.authHeaders(token) }),
       );
       this.currentUser.set(user);
-      if (user.roles.some((role) => role === 'faculty' || role === 'admin')) {
-        void this.loadSubjects();
-      }
+      void this.loadSubjects();
+      void this.loadDashboard();
     } catch {
       localStorage.removeItem('atlas_exam_token');
     }
@@ -241,9 +302,51 @@ export class App {
     }
   }
 
+  private async loadDashboard(): Promise<void> {
+      const user = this.currentUser();
+      if (!user) {
+        this.dashboardState.set('error');
+        this.dashboardMessage.set('Sign in to load live workspace data.');
+        return;
+      }
+      this.dashboardState.set('loading');
+      try {
+        if (user.roles.some((role) => role === 'faculty' || role === 'admin')) {
+          const [drafts, banks] = await Promise.all([
+            firstValueFrom(this.http.get<ReviewQuestion[]>('/api/questions/review?review_status=draft', { headers: this.authHeaders() })),
+            firstValueFrom(this.http.get<QuestionBank[]>('/api/question-bank', { headers: this.authHeaders() })),
+          ]);
+          this.dashboardDraftCount.set(drafts.length);
+          this.dashboardBankCount.set(banks.length);
+        } else {
+          const overview = await firstValueFrom(
+            this.http.get<StudentAnalytics>(`/api/analytics/student?student_id=${encodeURIComponent(user.id)}`, {
+              headers: this.authHeaders(),
+            }),
+          );
+          this.dashboardPracticeScore.set(overview.average_percentage);
+        }
+        this.dashboardState.set('loaded');
+        this.dashboardMessage.set('Live data from your connected workspace.');
+      } catch {
+        this.dashboardState.set('error');
+        this.dashboardMessage.set('Some workspace data could not be loaded.');
+      }
+    }
+
   protected selectView(view: string): void {
     this.activeView.set(view);
+    if (view === 'Overview' && this.dashboardState() === 'idle') {
+      void this.loadDashboard();
+    }
+    if (view === 'Question paper') {
+      if (this.subjectState() === 'idle') void this.loadSubjects();
+      if (this.currentUser() && this.templateState() === 'idle') void this.loadGenerationTemplates();
+    }
     if (view === 'Generate' && this.templateState() === 'idle') {
+      void this.loadGenerationTemplates();
+    }
+    if (view === 'Patterns' && this.templateState() === 'idle') {
       void this.loadGenerationTemplates();
     }
     if (view === 'Question bank' && this.reviewState() === 'idle') {
@@ -255,17 +358,56 @@ export class App {
     if (view === 'Materials' && this.subjectState() === 'idle') {
       void this.loadSubjects();
     }
+    if (view === 'Practice' && this.currentUser() && this.subjectState() === 'idle') {
+      void this.loadSubjects();
+    }
+    if (view === 'Analytics' && this.analyticsState() === 'idle') {
+      void this.loadAnalytics();
+    }
+  }
+
+  private async loadAnalytics(): Promise<void> {
+    const user = this.currentUser();
+    if (!user) {
+      this.analyticsState.set('error');
+      this.analyticsMessage.set('Sign in to view practice performance.');
+      return;
+    }
+    this.analyticsState.set('loading');
+    try {
+      const headers = { headers: this.authHeaders() };
+      const [overview, topics, difficulties] = await Promise.all([
+        firstValueFrom(this.http.get<StudentAnalytics>(`/api/analytics/student?student_id=${encodeURIComponent(user.id)}`, headers)),
+        firstValueFrom(this.http.get<AnalyticsBreakdown[]>(`/api/analytics/student/topics?student_id=${encodeURIComponent(user.id)}`, headers)),
+        firstValueFrom(this.http.get<AnalyticsBreakdown[]>(`/api/analytics/student/difficulty?student_id=${encodeURIComponent(user.id)}`, headers)),
+      ]);
+      this.studentAnalytics.set(overview);
+      this.topicAnalytics.set(topics);
+      this.difficultyAnalytics.set(difficulties);
+      this.analyticsState.set('loaded');
+      this.analyticsMessage.set('Performance is calculated from submitted practice answers.');
+    } catch {
+      this.analyticsState.set('error');
+      this.analyticsMessage.set('Analytics could not be loaded. Try again after completing a practice test.');
+    }
   }
 
   private async loadSubjects(): Promise<void> {
     this.subjectState.set('loading');
     try {
-      const subjects = await firstValueFrom(
+      const response = await firstValueFrom(
         this.http.get<Subject[]>('/api/subjects', { headers: this.authHeaders() }),
       );
+      const subjects = response.map((subject) => ({
+        ...subject,
+        id: subject.id || subject._id || '',
+      }));
       this.subjects.set(subjects);
       if (!this.materialSubject() && subjects.length) {
         this.selectMaterialSubject(subjects[0].id);
+      }
+      if (!this.practiceSubject() || !subjects.some((subject) => subject.id === this.practiceSubject())) {
+        this.practiceSubject.set(subjects[0]?.id ?? '');
       }
       this.subjectState.set('idle');
       this.subjectMessage.set(
@@ -295,13 +437,17 @@ export class App {
     }
     this.subjectState.set('creating');
     try {
-      const subject = await firstValueFrom(
+      const response = await firstValueFrom(
         this.http.post<Subject>(
           '/api/subjects',
           { code: this.subjectCode(), name: this.subjectName() },
           { headers: this.authHeaders() },
         ),
       );
+      const subject = {
+        ...response,
+        id: response.id || response._id || '',
+      };
       this.subjects.update((subjects) => [...subjects, subject]);
       this.selectMaterialSubject(subject.id);
       this.subjectCode.set('');
@@ -320,7 +466,7 @@ export class App {
       const banks = await firstValueFrom(
         this.http.get<QuestionBank[]>('/api/question-bank', { headers: this.authHeaders() }),
       );
-      const approved = banks.filter((bank) => bank.approval_status === 'approved');
+      const approved = banks.map((bank) => normalizeId(bank)).filter((bank) => bank.approval_status === 'approved');
       this.questionBanks.set(approved);
       if (!this.paperBankId() && approved.length) {
         this.paperBankId.set(approved[0].id);
@@ -360,7 +506,7 @@ export class App {
           { headers: this.authHeaders() },
         ),
       );
-      this.modelPaper.set(paper);
+      this.modelPaper.set(normalizeId(paper));
       this.paperState.set('done');
       this.paperMessage.set(`Draft paper created with ${paper.question_count} questions.`);
     } catch {
@@ -398,7 +544,7 @@ export class App {
           headers: this.authHeaders(),
         }),
       );
-      this.reviewQuestions.set(questions);
+      this.reviewQuestions.set(questions.map((question) => normalizeQuestion(question)));
       this.reviewState.set('ready');
       this.reviewMessage.set(`${questions.length} draft question(s) require faculty review.`);
     } catch {
@@ -422,7 +568,7 @@ export class App {
           headers: this.authHeaders(),
         }),
       );
-      this.approvedQuestions.set(questions);
+      this.approvedQuestions.set(questions.map((question) => normalizeQuestion(question)));
       this.bankCreateState.set('ready');
       this.bankMessage.set(`${questions.length} approved question(s) available.`);
     } catch {
@@ -450,14 +596,15 @@ export class App {
           { headers: this.authHeaders() },
         ),
       );
+      const normalizedBank = normalizeId(bank);
       await firstValueFrom(
-        this.http.post(`/api/question-bank/${bank.id}/approve`, null, {
+        this.http.post(`/api/question-bank/${normalizedBank.id}/approve`, null, {
           headers: this.authHeaders(),
         }),
       );
       this.bankCreateState.set('done');
       this.bankMessage.set(
-        `Question bank created and approved with ${bank.question_ids.length} question(s).`,
+        `Question bank created and approved with ${normalizedBank.question_ids.length} question(s).`,
       );
       this.selectedQuestionIds.set([]);
     } catch {
@@ -522,7 +669,7 @@ export class App {
     }
   }
 
-  protected async uploadMaterial(): Promise<void> {
+  protected async uploadMaterial(): Promise<boolean> {
     const file = this.materialFile();
     if (!this.materialSubject() && this.subjects().length === 1) {
       this.materialSubject.set(this.subjects()[0].id);
@@ -538,7 +685,7 @@ export class App {
           : 'Wait for the file to finish loading before starting.';
       this.materialError.set(missing);
       this.materialMessage.set(missing);
-      return;
+      return false;
     }
     this.materialError.set('');
     this.materialProgress.set(5);
@@ -552,11 +699,18 @@ export class App {
       this.materialProgress.set(20);
       this.materialStage.set('uploading');
       this.materialMessage.set('Uploading file to the backend...');
-      const material = await firstValueFrom(
+      const response = await firstValueFrom(
         this.http.post<MaterialResponse>('/api/materials/upload', form, {
           headers: this.authHeaders(),
         }),
       );
+      const material = {
+        ...response,
+        id: response.id || response._id || '',
+      };
+      if (!material.id) {
+        throw new Error('The upload response did not include a material ID.');
+      }
       this.uploadedMaterial.set(material);
       this.materialState.set('processing');
       this.materialProgress.set(55);
@@ -571,10 +725,25 @@ export class App {
           headers: this.authHeaders(),
         }),
       );
+      this.materialProgress.set(85);
+      this.materialStage.set('indexing');
+      this.materialMessage.set(
+        `Created ${result.chunk_count} chunk(s). Indexing them for grounded retrieval...`,
+      );
+      const indexResult = await firstValueFrom(
+        this.http.post<{ indexed_chunks: number; embedding_model: string }>(
+          `/api/retrieval/materials/${material.id}/index`,
+          null,
+          { headers: this.authHeaders() },
+        ),
+      );
       this.materialState.set('done');
       this.materialProgress.set(100);
       this.materialStage.set('complete');
-      this.materialMessage.set(`Material processed into ${result.chunk_count} retrieval chunk(s).`);
+      this.materialMessage.set(
+        `Material ready: ${indexResult.indexed_chunks} chunk(s) indexed with ${indexResult.embedding_model}.`,
+      );
+      return true;
     } catch (error: unknown) {
       this.materialState.set('error');
       this.materialProgress.set(0);
@@ -582,6 +751,7 @@ export class App {
       const message = this.extractErrorMessage(error);
       this.materialError.set(message);
       this.materialMessage.set(message);
+      return false;
     }
   }
 
@@ -591,34 +761,121 @@ export class App {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  private extractErrorMessage(error: unknown): string {
+  private extractErrorMessage(error: unknown, fallback = 'The backend could not complete this operation.'): string {
     if (typeof error === 'object' && error !== null && 'error' in error) {
       const responseError = (error as { error?: { message?: string; detail?: string } | string }).error;
       if (typeof responseError === 'string') return responseError;
       return (
         responseError?.message ??
         responseError?.detail ??
-        'The backend returned an unexpected error.'
+        fallback
       );
     }
-    return 'The backend could not complete this operation.';
+    return fallback;
   }
 
   private async loadGenerationTemplates(): Promise<void> {
     this.templateState.set('loading');
     try {
-      const templates = await firstValueFrom(
+      const response = await firstValueFrom(
         this.http.get<QuestionTemplate[]>('/api/templates', { headers: this.authHeaders() }),
       );
+      const templates = response.map((template) => ({
+        ...template,
+        id: template.id || template._id || '',
+      }));
       this.generationTemplates.set(templates);
       if (!this.generationTemplateId() && templates.length) {
         this.generationTemplateId.set(templates[0].id);
         this.generationDifficulty.set(templates[0].supported_difficulties[0] ?? 'Medium');
         this.generationBloom.set(templates[0].supported_bloom_levels[0] ?? 'Understand');
       }
+
       this.templateState.set('loaded');
     } catch {
       this.templateState.set('error');
+    }
+  }
+
+  protected async createPattern(): Promise<void> {
+    const user = this.currentUser();
+    if (!user || !user.roles.some((role) => role === 'faculty' || role === 'admin')) {
+      this.patternState.set('error');
+      this.patternMessage.set('Sign in with a faculty or admin account before creating a pattern.');
+      return;
+    }
+    if (!this.patternName().trim()) {
+      this.patternState.set('error');
+      this.patternMessage.set('Enter a pattern name.');
+      return;
+    }
+    const total = this.patternSections().reduce((sum, section) => sum + section.count * section.marks, 0);
+    if (total !== this.patternTotalMarks()) {
+      this.patternState.set('error');
+      this.patternMessage.set(`Section marks total ${total}, but the paper total is ${this.patternTotalMarks()}.`);
+      return;
+    }
+    this.patternState.set('saving');
+    try {
+      const created = await firstValueFrom(
+        this.http.post<QuestionTemplate>(
+          '/api/templates',
+          {
+            name: this.patternName().trim(),
+            question_type: this.patternSections()[0].question_type,
+            pattern: this.patternSections()[0].pattern,
+            required_fields: ['question_text', 'explanation'],
+            supported_difficulties: ['Easy', 'Medium', 'Hard'],
+            supported_bloom_levels: ['Remember', 'Understand', 'Apply', 'Analyze', 'Evaluate', 'Create'],
+            version: '1.0',
+            marks: this.patternSections()[0].marks,
+            sections: this.patternSections(),
+            total_marks: this.patternTotalMarks(),
+          },
+          { headers: this.authHeaders() },
+        ),
+      );
+      this.generationTemplates.update((templates) => [
+        ...templates,
+        { ...created, id: created.id || created._id || '' },
+      ]);
+      this.patternState.set('done');
+      this.patternMessage.set(`${this.patternName()} is ready in the Generate page.`);
+      this.patternName.set('');
+    } catch (error: unknown) {
+      this.patternState.set('error');
+      this.patternMessage.set(this.extractErrorMessage(error, 'Pattern could not be created.'));
+    }
+  }
+
+  protected updatePatternSection(index: number, field: keyof PatternSection, value: string): void {
+    this.patternSections.update((sections) =>
+      sections.map((section, sectionIndex) =>
+        sectionIndex === index
+          ? { ...section, [field]: field === 'count' || field === 'marks' ? Number(value) : value }
+          : section,
+      ),
+    );
+  }
+
+  protected addPatternSection(): void {
+    this.patternSections.update((sections) => [
+      ...sections,
+      { question_type: 'Descriptive', pattern: 'Long Answer', count: 1, marks: 5 },
+    ]);
+  }
+
+  protected removePatternSection(index: number): void {
+    if (this.patternSections().length === 1) return;
+    this.patternSections.update((sections) => sections.filter((_, sectionIndex) => sectionIndex !== index));
+  }
+
+  protected selectGenerationTemplate(templateId: string): void {
+    this.generationTemplateId.set(templateId);
+    const template = this.generationTemplates().find((item) => item.id === templateId);
+    if (template) {
+      this.generationDifficulty.set(template.supported_difficulties[0] ?? 'Medium');
+      this.generationBloom.set(template.supported_bloom_levels[0] ?? 'Understand');
     }
   }
 
@@ -732,6 +989,8 @@ export class App {
       }
       this.loginPassword.set('');
       this.loginOpen.set(false);
+      this.dashboardState.set('idle');
+      void this.loadDashboard();
     } catch {
       this.loginMessage.set('Unable to sign in. Check your email and password.');
     } finally {
@@ -745,18 +1004,33 @@ export class App {
   }
 
   protected async generateQuestions(): Promise<void> {
+    if (!this.currentUser()) {
+      this.generationState.set('error');
+      this.generationMessage.set('Sign in as faculty or admin to generate a question paper.');
+      this.openLogin();
+      return;
+    }
+    if (this.materialState() !== 'done') {
+      this.generationState.set('generating');
+      this.generationMessage.set('Uploading and indexing your book before generation...');
+      const indexed = await this.uploadMaterial();
+      if (!indexed) {
+        this.generationState.set('error');
+        this.generationMessage.set(this.materialMessage());
+        return;
+      }
+    }
     this.generationState.set('generating');
     this.generationMessage.set('Retrieving source context and generating candidates...');
     try {
       const questions = await firstValueFrom(
         this.http.post<GeneratedQuestion[]>(
-          '/api/questions/generate',
+          '/api/questions/generate/paper',
           {
             template_id: this.generationTemplateId(),
-            query: this.generationQuery(),
             difficulty: this.generationDifficulty(),
             bloom_level: this.generationBloom(),
-            candidate_count: this.generationCount(),
+            subject_id: this.materialSubject() || null,
             top_k: 5,
           },
           { headers: this.authHeaders() },
@@ -767,11 +1041,13 @@ export class App {
       this.generationMessage.set(
         `${questions.length} candidate question(s) generated. Review before saving.`,
       );
-    } catch {
+      this.activeView.set('Generated questions');
+    } catch (error: unknown) {
       this.generationState.set('error');
-      this.generationMessage.set(
-        'Generation failed. Check your sign-in, template ID, and indexed source material.',
-      );
+      this.generationMessage.set(this.extractErrorMessage(
+        error,
+        'Generation failed. Upload and index material, then select a valid pattern and source topic.',
+      ));
     }
   }
 
@@ -783,9 +1059,10 @@ export class App {
           '/api/questions',
           {
             question,
-            question_type: 'MCQ',
-            pattern: 'Direct Concept',
+            question_type: question.question_type ?? 'MCQ',
+            pattern: question.pattern ?? 'Direct Concept',
             template_id: this.generationTemplateId(),
+            marks: question.marks ?? 1,
           },
           { headers: this.authHeaders() },
         ),

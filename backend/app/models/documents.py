@@ -75,6 +75,9 @@ class QuestionTemplateDocument(AuditDocument):
     supported_difficulties: list[str] = Field(min_length=1)
     supported_bloom_levels: list[str] = Field(min_length=1)
     version: str = Field(min_length=1, max_length=30)
+    marks: int = Field(default=1, ge=1, le=100)
+    sections: list[dict[str, str | int]] = Field(default_factory=list)
+    total_marks: int = Field(default=1, ge=1, le=1_000)
 
 
 class QuestionDocument(AuditDocument):
@@ -91,6 +94,7 @@ class QuestionDocument(AuditDocument):
     subject_id: str | None = None
     syllabus_id: str | None = None
     topic_id: str | None = None
+    marks: int = Field(default=1, ge=1, le=100)
     review_status: str = "draft"
     review_note: str | None = None
 

@@ -1,7 +1,10 @@
+import mongomock
 import pytest
+from fastapi import HTTPException
 
+from app.api.questions import GenerateRequest, generate_questions
 from app.models import DocumentChunkDocument, QuestionTemplateDocument
-from app.services.generation import GenerationError, GenerationService
+from app.services.generation import DeterministicLLMProvider, GenerationError, GenerationService
 
 
 def template() -> QuestionTemplateDocument:
@@ -80,3 +83,32 @@ def test_generation_suppresses_duplicate_candidates() -> None:
     )
 
     assert len(results) == 1
+
+
+def test_deterministic_provider_preserves_pipe_characters_in_source() -> None:
+    pipe_chunk = chunk()
+    pipe_chunk["chunk"].content = "GIS uses layers | maps | and spatial analysis."
+
+    results = GenerationService(DeterministicLLMProvider()).generate(
+        template=template(), chunks=[pipe_chunk], difficulty="Medium", bloom_level="Apply"
+    )
+
+    assert results[0].sources[0].page == 4
+    assert "GIS uses layers" in results[0].question_text
+
+
+def test_question_generation_requires_indexed_source_chunks() -> None:
+    database = mongomock.MongoClient().test
+    configured_template = template()
+    database.question_templates.insert_one(configured_template.model_dump(by_alias=True))
+
+    with pytest.raises(HTTPException, match="No indexed source chunks"):
+        generate_questions(
+            GenerateRequest(
+                template_id=configured_template.id,
+                query="binary trees",
+                difficulty="Medium",
+                bloom_level="Apply",
+            ),
+            database,
+        )

@@ -1,8 +1,10 @@
 import mongomock
 
+from fastapi import HTTPException
+
 from app.api.analytics import get_student_analytics, get_student_difficulty_summary, get_student_topic_summary
 from app.database import ensure_indexes
-from app.models import PracticeTestDocument, QuestionDocument
+from app.models import PracticeTestDocument, QuestionDocument, UserDocument
 
 
 def make_question(subject_id: str = "subject-1", topic_id: str = "topic-1", difficulty: str = "Medium") -> QuestionDocument:
@@ -56,3 +58,20 @@ def test_student_analytics_rolls_up_attempts_by_topic_and_difficulty() -> None:
     assert overview["weak_topics"][0]["topic_id"] == "topic-1"
     assert topics[0]["topic_id"] == "topic-1"
     assert difficulties[0]["difficulty"] in {"Easy", "Medium"}
+
+
+def test_students_cannot_view_another_students_analytics() -> None:
+    database = mongomock.MongoClient().test
+    user = UserDocument(
+        email="student@example.com",
+        display_name="Student",
+        password_hash="hash",
+        roles=["student"],
+    )
+
+    try:
+        get_student_analytics("another-student", database, user)
+    except HTTPException as error:
+        assert error.status_code == 403
+    else:
+        raise AssertionError("Expected analytics access to be denied")

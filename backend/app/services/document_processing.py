@@ -97,6 +97,8 @@ class DocumentProcessingService:
 
     def process(self, material_id: str) -> tuple[StudyMaterialDocument, int]:
         stored = self.database.study_materials.find_one({"_id": material_id})
+        if stored is None:
+            stored = self.database.study_materials.find_one({"id": material_id})
         if not stored:
             raise DocumentProcessingError("Material not found.")
         material = StudyMaterialDocument.model_validate(stored)
@@ -133,11 +135,28 @@ class DocumentProcessingService:
 
     def get_status(self, material_id: str) -> dict:
         material = self.database.study_materials.find_one({"_id": material_id})
+        if material is None:
+            material = self.database.study_materials.find_one({"id": material_id})
         if not material:
             raise DocumentProcessingError("Material not found.")
+        resolved_material_id = str(material.get("id", material.get("_id", material_id)))
+        indexed_chunks = list(
+            self.database.document_chunks.find(
+                {
+                    "study_material_id": resolved_material_id,
+                    "embedding": {"$exists": True, "$ne": None},
+                },
+                {"embedding_model": 1},
+            )
+        )
+        embedding_models = {item.get("embedding_model") for item in indexed_chunks if item.get("embedding_model")}
         return {
             "material": StudyMaterialDocument.model_validate(material),
-            "chunk_count": self.database.document_chunks.count_documents({"study_material_id": material_id}),
+            "chunk_count": self.database.document_chunks.count_documents(
+                {"study_material_id": resolved_material_id}
+            ),
+            "indexed_chunk_count": len(indexed_chunks),
+            "embedding_model": next(iter(embedding_models), None) if len(embedding_models) == 1 else None,
         }
 
     def _validate_upload(self, filename: str, content_type: str, content: bytes) -> str:

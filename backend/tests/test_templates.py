@@ -55,3 +55,21 @@ def test_template_payload_requires_supported_configuration() -> None:
             supported_bloom_levels=["Apply"],
             version="1.0",
         )
+
+
+def test_pattern_blueprint_requires_matching_total_marks() -> None:
+    with pytest.raises(ValueError, match="total_marks"):
+        TemplatePayload(
+            name="Mixed paper",
+            question_type="MCQ",
+            pattern="Direct Concept",
+            required_fields=["question_text"],
+            supported_difficulties=["Medium"],
+            supported_bloom_levels=["Apply"],
+            version="1.0",
+            total_marks=19,
+            sections=[
+                {"question_type": "MCQ", "pattern": "Direct Concept", "count": 10, "marks": 1},
+                {"question_type": "Descriptive", "pattern": "Long Answer", "count": 2, "marks": 5},
+            ],
+        )

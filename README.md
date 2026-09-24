@@ -27,6 +27,7 @@ The backend currently covers the core academic and assessment workflow:
 - Persistence: MongoDB with PyMongo indexes and mongomock-based test coverage
 - API prefix: /api
 - Interactive API docs: /docs and /redoc
+- API contract summary: [docs/04-API-CONTRACTS.md](docs/04-API-CONTRACTS.md)
 
 ## Local development
 
@@ -84,6 +85,25 @@ npm start
 
 The frontend runs at http://localhost:4200.
 
+Compose intentionally runs the backend and MongoDB only. The Angular
+development server remains a separate local process; no production web-server
+or cloud provider is assumed by this repository.
+
+### Deployment checklist
+
+Before using the scaffold outside local development:
+
+1. Set a unique `JWT_SECRET_KEY` (at least 32 characters).
+2. Set `ENVIRONMENT=production`, explicit `ALLOWED_ORIGINS`, and a managed
+   `MONGODB_URL`/`MONGODB_DATABASE`.
+3. Use a persistent, access-controlled `MATERIAL_STORAGE_PATH` and back it up.
+4. Keep `LLM_PROVIDER=deterministic` unless the selected provider credentials
+   and billing have been configured.
+5. Put TLS and network access controls in the institution's chosen ingress or
+   platform; this repository does not prescribe one.
+6. Verify `GET /api/health`, `/docs`, and the backend/frontend checks after
+   deployment.
+
 ## Docker deployment
 
 The repository includes Docker support for a quick deployment workflow.
@@ -91,6 +111,8 @@ The repository includes Docker support for a quick deployment workflow.
 ### Build and run with Docker Compose
 
 ```powershell
+Copy-Item .env.example .env
+# Set JWT_SECRET_KEY to a new secret of at least 32 characters in .env
 docker compose up --build
 ```
 
@@ -117,6 +139,12 @@ cd backend
 
 The current backend test suite passes and covers the implemented phases.
 
+Run the deterministic Phase 13 research benchmark from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_research_evaluation.py
+```
+
 Run the frontend build and unit tests:
 
 ```powershell
@@ -133,12 +161,15 @@ The frontend tests run with Angular's configured Vitest/jsdom builder. Browser-p
 - The API uses request correlation IDs and structured JSON logging.
 - Generated content is treated as untrusted and validation remains explicit.
 - Security controls include RBAC, validation, headers, and rate limiting.
+- Pull requests and pushes to `main`/`master` run the repository CI workflow
+  (`.github/workflows/ci.yml`) for backend tests and frontend build/tests.
 
 ## Production integration boundaries
 
-The repository is complete as a deterministic local MVP and deployment scaffold. These external integrations remain intentionally behind existing abstractions:
+The repository is complete as a deterministic local MVP and deployment scaffold. These institution-specific integrations remain intentionally behind existing abstractions:
 
 - connect a real LLM provider behind the generation abstraction
 - replace hashing embeddings with a managed vector index for production workloads
 - configure MongoDB, JWT secrets, CORS origins, and storage paths per environment
-- add CI/CD and an institutional deployment policy for staging and production
+- choose and configure CI/CD, ingress, backups, monitoring, and an
+  institutional deployment policy for staging and production

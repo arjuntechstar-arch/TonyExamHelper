@@ -1,10 +1,9 @@
-from collections.abc import Callable
 from typing import Protocol
 
 from pydantic import BaseModel, Field, ValidationError
 import httpx
 
-from app.models import DocumentChunkDocument, QuestionTemplateDocument
+from app.models import QuestionTemplateDocument
 
 
 class QuestionOption(BaseModel):
@@ -25,6 +24,9 @@ class GeneratedQuestion(BaseModel):
     difficulty: str = Field(min_length=1)
     bloom_level: str = Field(min_length=1)
     sources: list[QuestionSource] = Field(min_length=1)
+    question_type: str = "MCQ"
+    pattern: str = "Direct Concept"
+    marks: int = Field(default=1, ge=1, le=100)
 
 
 class LLMProvider(Protocol):
@@ -40,12 +42,27 @@ class DeterministicLLMProvider:
 
     def generate_structured(self, prompt: str) -> dict:
         lines = [line for line in prompt.splitlines() if line.startswith("SOURCE|")]
-        source_id, page, content = lines[0].split("|", 3) if lines else ("unknown", "1", "Insufficient context")
+        if lines:
+            candidate_index = int(prompt_value(prompt, "CANDIDATE_INDEX") or 0)
+            source_id, page, content = (
+                lines[candidate_index % len(lines)].split("|", 3)[1:]
+            )
+        else:
+            source_id, page, content = "unknown", "1", "Insufficient context"
+            candidate_index = 0
+        stems = (
+            "According to the material, which statement is correct about",
+            "A teacher asks students to identify the key idea about",
+            "Which conclusion is best supported by the material about",
+            "When applying the material, which statement correctly describes",
+        )
+        stem = stems[candidate_index % len(stems)]
+        topic = content.strip().rstrip(".!?")
         return {
-            "question_text": f"Which statement is supported by the provided material about: {content[:180]}?",
+            "question_text": f"{stem} {topic[:180]}?",
             "options": [
-                {"key": "A", "text": content[:180] or "The material contains no supporting detail."},
-                {"key": "B", "text": "The material does not support this statement."},
+                {"key": "A", "text": topic[:180] or "The material contains no supporting detail."},
+                {"key": "B", "text": "This statement is not supported by the material."},
             ],
             "correct_answer": "A",
             "explanation": "The answer is grounded in the retrieved source content.",
@@ -136,6 +153,8 @@ class GenerationService:
         difficulty: str,
         bloom_level: str,
         candidate_count: int = 1,
+        deduplicate_results: bool = True,
+        candidate_index: int = 0,
     ) -> list[GeneratedQuestion]:
         if difficulty not in template.supported_difficulties:
             raise GenerationError("The requested difficulty is not supported by the template.")
@@ -146,11 +165,25 @@ class GenerationService:
         if not chunks:
             raise GenerationError("Insufficient context to generate a grounded question.")
 
-        prompt = build_prompt(template, chunks, difficulty, bloom_level)
+        prompt = build_prompt(
+            template,
+            chunks,
+            difficulty,
+            bloom_level,
+            candidate_index=candidate_index,
+        )
         results: list[GeneratedQuestion] = []
         for _ in range(candidate_count):
-            results.append(self._generate_one(prompt))
-        return deduplicate(results)
+            results.append(
+                self._generate_one(prompt).model_copy(
+                    update={
+                        "question_type": template.question_type,
+                        "pattern": template.pattern,
+                        "marks": template.marks,
+                    }
+                )
+            )
+        return deduplicate(results) if deduplicate_results else results
 
     def _generate_one(self, prompt: str) -> GeneratedQuestion:
         last_error: Exception | None = None
@@ -167,7 +200,14 @@ def prompt_value(prompt: str, key: str) -> str:
     return next((line.removeprefix(prefix) for line in prompt.splitlines() if line.startswith(prefix)), "Unknown")
 
 
-def build_prompt(template: QuestionTemplateDocument, chunks: list[dict], difficulty: str, bloom_level: str) -> str:
+def build_prompt(
+    template: QuestionTemplateDocument,
+    chunks: list[dict],
+    difficulty: str,
+    bloom_level: str,
+    *,
+    candidate_index: int = 0,
+) -> str:
     source_lines = [
         f"SOURCE|{result['chunk'].id}|{result['chunk'].page_number}|{result['chunk'].content}"
         for result in chunks
@@ -179,7 +219,9 @@ def build_prompt(template: QuestionTemplateDocument, chunks: list[dict], difficu
             f"PATTERN|{template.pattern}",
             f"DIFFICULTY|{difficulty}",
             f"BLOOM|{bloom_level}",
+            f"CANDIDATE_INDEX|{candidate_index}",
             f"FIELDS|{','.join(template.required_fields)}",
+            "Generate a teacher-written question, not a summary. Use only the source facts, follow the pattern exactly, and do not repeat any other candidate.",
             *source_lines,
         ]
     )

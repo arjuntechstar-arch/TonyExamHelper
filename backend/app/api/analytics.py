@@ -14,8 +14,9 @@ AnalyticsUser = Depends(require_roles("student", "admin", "faculty"))
 def get_student_analytics(
     student_id: str,
     database: Database = Depends(get_database),
-    _: UserDocument = AnalyticsUser,
+    user: UserDocument = AnalyticsUser,
 ) -> dict:
+    _ensure_access(student_id, user)
     try:
         return AnalyticsService(database).student_overview(student_id)
     except ValueError as error:
@@ -26,8 +27,9 @@ def get_student_analytics(
 def get_student_topic_summary(
     student_id: str,
     database: Database = Depends(get_database),
-    _: UserDocument = AnalyticsUser,
+    user: UserDocument = AnalyticsUser,
 ) -> list[dict]:
+    _ensure_access(student_id, user)
     try:
         return AnalyticsService(database).topic_summary(student_id)
     except ValueError as error:
@@ -38,9 +40,21 @@ def get_student_topic_summary(
 def get_student_difficulty_summary(
     student_id: str,
     database: Database = Depends(get_database),
-    _: UserDocument = AnalyticsUser,
+    user: UserDocument = AnalyticsUser,
 ) -> list[dict]:
+    _ensure_access(student_id, user)
     try:
         return AnalyticsService(database).difficulty_summary(student_id)
     except ValueError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+
+def _ensure_access(student_id: str, user: UserDocument) -> None:
+    # Direct service-level callers do not receive FastAPI dependency injection.
+    if not isinstance(user, UserDocument):
+        return
+    if "student" in user.roles and user.id != student_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Students can only view their own analytics.",
+        )

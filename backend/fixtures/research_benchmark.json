@@ -1,0 +1,14 @@
+{
+  "name": "phase-13-question-quality-v1",
+  "expected_topics": ["arrays", "graphs", "sorting"],
+  "questions": [
+    {"question_text": "What is the time complexity of binary search?", "topic": "arrays", "difficulty": "Easy", "bloom_level": "Remember", "pattern": "Direct Concept"},
+    {"question_text": "How does breadth-first search visit a graph?", "topic": "graphs", "difficulty": "Medium", "bloom_level": "Understand", "pattern": "Scenario Based"},
+    {"question_text": "Which sorting algorithm is stable?", "topic": "sorting", "difficulty": "Medium", "bloom_level": "Apply", "pattern": "Direct Concept"},
+    {"question_text": "What is the time complexity of binary search?", "topic": "arrays", "difficulty": "Easy", "bloom_level": "Remember", "pattern": "Direct Concept"}
+  ],
+  "baseline_questions": [
+    {"question_text": "What is an array?", "topic": "arrays", "difficulty": "Easy", "bloom_level": "Remember", "pattern": "Direct Concept"},
+    {"question_text": "What is an array?", "topic": "arrays", "difficulty": "Easy", "bloom_level": "Remember", "pattern": "Direct Concept"}
+  ]
+}

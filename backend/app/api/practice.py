@@ -48,7 +48,12 @@ def submit_practice_answers(
     user: UserDocument = PracticeUser,
 ) -> dict:
     try:
-        result = PracticeService(database).submit_answers(practice_id, payload.answers)
+        result = PracticeService(database).submit_answers(
+            practice_id,
+            payload.answers,
+            requester_id=getattr(user, "id", None),
+            requester_roles=getattr(user, "roles", []),
+        )
     except PracticeError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     return result
@@ -74,9 +79,13 @@ def get_practice(
 def get_practice_result(
     practice_id: str,
     database: Database = Depends(get_database),
-    _: UserDocument = PracticeUser,
+    user: UserDocument = PracticeUser,
 ) -> dict:
     try:
-        return PracticeService(database).get_result(practice_id)
+        return PracticeService(database).get_result(
+            practice_id,
+            requester_id=getattr(user, "id", None),
+            requester_roles=getattr(user, "roles", []),
+        )
     except PracticeError as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error

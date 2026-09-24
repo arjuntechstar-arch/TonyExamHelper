@@ -12,7 +12,11 @@ describe('App', () => {
   });
 
   afterEach(() => {
-    TestBed.inject(HttpTestingController).verify();
+    try {
+      TestBed.inject(HttpTestingController).verify();
+    } finally {
+      TestBed.resetTestingModule();
+    }
   });
 
   it('should create the app', () => {
@@ -77,15 +81,36 @@ describe('App', () => {
   it('should bind the selected material subject and submit it with the file', async () => {
     const fixture = TestBed.createComponent(App);
     const http = TestBed.inject(HttpTestingController);
+    const component = fixture.componentInstance as unknown as {
+      currentUser: { set(user: { id: string; email: string; display_name: string; roles: string[] }): void };
+    };
+    component.currentUser.set({
+      id: 'faculty-1',
+      email: 'faculty@example.com',
+      display_name: 'Faculty',
+      roles: ['faculty'],
+    });
     http
       .expectOne('/api/health')
       .flush({ status: 'ok', service: 'api', timestamp: '2026-01-01T00:00:00Z' });
     await fixture.whenStable();
 
-    const materialsLink = (Array.from(
+    const questionPaperLink = (Array.from(
       fixture.nativeElement.querySelectorAll('button'),
-    ) as HTMLButtonElement[]).find((button) => button.textContent?.includes('Materials')) as HTMLButtonElement;
-    materialsLink.click();
+    ) as HTMLButtonElement[]).find((button) => button.textContent?.includes('Question paper')) as HTMLButtonElement;
+    questionPaperLink.click();
+    const templatesRequest = http.expectOne('/api/templates');
+    templatesRequest.flush([{
+      id: 'pattern-1',
+      name: 'GIS paper',
+      question_type: 'MCQ',
+      pattern: 'Direct Concept',
+      supported_difficulties: ['Easy', 'Medium', 'Hard'],
+      supported_bloom_levels: ['Understand'],
+      marks: 1,
+      total_marks: 1,
+      sections: [{ question_type: 'MCQ', pattern: 'Direct Concept', count: 1, marks: 1 }],
+    }]);
     const subjectsRequest = http.expectOne('/api/subjects');
     subjectsRequest.flush([{ id: 'gis2026', code: 'GIS2026', name: 'GIS AND ITS APPLICATIONS' }]);
     await fixture.whenStable();
@@ -103,15 +128,49 @@ describe('App', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     fixture.detectChanges();
 
-    const uploadButton = fixture.nativeElement.querySelector('.start-button') as HTMLButtonElement;
-    expect(uploadButton.disabled).toBe(false);
-    uploadButton.click();
+    const generateButton = fixture.nativeElement.querySelector('.start-button') as HTMLButtonElement;
+    expect(generateButton.disabled).toBe(false);
+    generateButton.click();
     const uploadRequest = http.expectOne('/api/materials/upload');
     expect(uploadRequest.request.body.get('subject_id')).toBe('gis2026');
     uploadRequest.flush({ id: 'material-1', filename: 'Module 2.pdf', status: 'uploaded', size_bytes: 13 });
     await new Promise((resolve) => setTimeout(resolve, 300));
     const processRequest = http.expectOne('/api/materials/material-1/process');
     processRequest.flush({ chunk_count: 1 });
+    await fixture.whenStable();
+    const indexRequest = http.expectOne('/api/retrieval/materials/material-1/index');
+    indexRequest.flush({ indexed_chunks: 1, embedding_model: 'hashing-v1' });
+    await fixture.whenStable();
+    const generateRequest = http.expectOne('/api/questions/generate/paper');
+    expect(generateRequest.request.body).toEqual({
+      template_id: 'pattern-1',
+      difficulty: 'Easy',
+      bloom_level: 'Understand',
+      subject_id: 'gis2026',
+      top_k: 5,
+    });
+    generateRequest.flush([{
+      id: 'question-1',
+      question_text: 'What is a geographic information system?',
+      question_type: 'MCQ',
+      pattern: 'Direct Concept',
+      marks: 1,
+      difficulty: 'Easy',
+      bloom_level: 'Understand',
+      options: [
+        { key: 'A', text: 'A mapping system' },
+        { key: 'B', text: 'A database only' },
+      ],
+      explanation: 'A GIS captures, stores, analyzes, and presents geographic data.',
+      sources: [{ page_number: 1, text: 'A geographic information system...' }],
+    }]);
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect((fixture.componentInstance as unknown as { activeView: () => string }).activeView()).toBe(
+      'Generated questions',
+    );
+    expect(fixture.nativeElement.textContent).toContain('What is a geographic information system?');
   });
 
   it('should show the sign-in dialog and report invalid credentials', async () => {

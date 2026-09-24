@@ -65,10 +65,18 @@ class PracticeService:
         self.database.practice_tests.insert_one(test.model_dump(by_alias=True))
         return test
 
-    def submit_answers(self, practice_test_id: str, answers: dict[str, str]) -> dict[str, Any]:
+    def submit_answers(
+        self,
+        practice_test_id: str,
+        answers: dict[str, str],
+        *,
+        requester_id: str | None = None,
+        requester_roles: list[str] | None = None,
+    ) -> dict[str, Any]:
         test = self.database.practice_tests.find_one({"_id": practice_test_id})
         if not test:
             raise PracticeError("Practice test not found.")
+        self._ensure_access(test, requester_id, requester_roles or [])
 
         question_ids = test.get("question_ids", [])
         if not question_ids:
@@ -167,10 +175,17 @@ class PracticeService:
             "questions": safe_questions,
         }
 
-    def get_result(self, practice_test_id: str) -> dict[str, Any]:
+    def get_result(
+        self,
+        practice_test_id: str,
+        *,
+        requester_id: str | None = None,
+        requester_roles: list[str] | None = None,
+    ) -> dict[str, Any]:
         test = self.database.practice_tests.find_one({"_id": practice_test_id})
         if not test:
             raise PracticeError("Practice test not found.")
+        self._ensure_access(test, requester_id, requester_roles or [])
 
         answers = list(self.database.student_answers.find({"practice_test_id": practice_test_id}).sort("submitted_at", -1))
         question_results = [
@@ -191,3 +206,10 @@ class PracticeService:
             "percentage": test.get("percentage", 0.0),
             "question_results": question_results,
         }
+
+    @staticmethod
+    def _ensure_access(test: dict[str, Any], requester_id: str | None, requester_roles: list[str]) -> None:
+        if requester_id is None:
+            return
+        if test.get("student_id") != requester_id and not set(requester_roles).intersection({"admin", "faculty"}):
+            raise PracticeError("You are not allowed to access this practice test.")

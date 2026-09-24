@@ -9,10 +9,9 @@
       @for (
         item of [
           'Overview',
-          'Generate',
-          'Question bank',
-          'Model papers',
-          'Materials',
+          'Patterns',
+          'Question paper',
+          'Generated questions',
           'Analytics',
           'Practice',
         ];
@@ -22,17 +21,15 @@
           <span class="nav-icon">{{
             item === 'Overview'
               ? '⌂'
-              : item === 'Generate'
+              : item === 'Question paper'
                 ? '✦'
-                : item === 'Question bank'
+                : item === 'Generated questions'
                   ? '▤'
-                  : item === 'Model papers'
-                    ? '□'
-                    : item === 'Materials'
-                      ? '↥'
-                      : item === 'Analytics'
-                        ? '◌'
-                        : '✧'
+                : item === 'Patterns'
+                  ? '▥'
+                : item === 'Question bank'
+                  ? '◌'
+                  : '✧'
           }}</span
           >{{ item }}
         </button>
@@ -80,10 +77,94 @@
       <div class="top-actions">
         <button class="icon-button" aria-label="Notifications">
           ♧<span class="notification-dot"></span></button
-        ><button class="outline-button" (click)="selectView('Materials')">＋ Add material</button>
+        ><button class="outline-button" (click)="selectView('Question paper')">＋ New question paper</button>
       </div>
     </header>
-    @if (activeView() === 'Practice') {
+    @if (activeView() === 'Generated questions') {
+      <section class="review-view">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Question paper preview</p>
+            <h2>Generated questions</h2>
+            <p>Review the complete paper generated from the uploaded document before saving questions as drafts.</p>
+          </div>
+          <button class="outline-button" (click)="selectView('Question paper')">Create another paper</button>
+        </div>
+        @if (generatedQuestions().length) {
+          <div class="candidate-list">
+            @for (question of generatedQuestions(); track $index) {
+              <article class="candidate-card">
+                <span class="metric-label">Question {{ $index + 1 }} · {{ question.question_type }} · {{ question.marks }} mark(s) · {{ question.difficulty }} · {{ question.bloom_level }}</span>
+                <h3>{{ question.question_text }}</h3>
+                @if (question.options.length) {
+                  <div class="candidate-options">
+                    @for (option of question.options; track option.key) {
+                      <span><b>{{ option.key }}</b>{{ option.text }}</span>
+                    }
+                  </div>
+                }
+                <p><strong>Explanation:</strong> {{ question.explanation }}</p>
+                <p class="metric-label">Source pages: {{ question.sources.length }}</p>
+                <button class="outline-button" (click)="saveGeneratedQuestion(question)">Save as draft</button>
+              </article>
+            }
+          </div>
+        } @else {
+          <div class="empty-state">No generated questions are available yet. Create a question paper first.</div>
+        }
+      </section>
+    } @else if (activeView() === 'Question paper') {
+      <section class="generation-view">
+        <div class="generation-intro">
+          <p class="eyebrow">Faculty workspace</p>
+          <h2>Build a question paper from your book.</h2>
+          <p>Select the subject, book, paper pattern, difficulty, and Bloom objective. Click Generate once; the book will be processed automatically and the questions will use the entire document.</p>
+          <div class="source-note"><span>01</span><p><strong>Source</strong><br />{{ materialFile()?.name || 'No study material selected' }}</p></div>
+        </div>
+        <div class="generation-panel">
+          <label>Subject<select [value]="materialSubject()" (change)="selectMaterialSubject($any($event.target).value)" [disabled]="subjectState() === 'loading'">
+            <option value="" disabled>Select a subject</option>
+            @for (subject of subjects(); track subject.id) {
+              <option [value]="subject.id" [selected]="subject.id === materialSubject()">{{ subject.code }} · {{ subject.name }}</option>
+            }
+          </select></label>
+          <label class="file-field">Select material<input type="file" accept=".pdf,.docx,.pptx,.txt" (change)="selectMaterialFile($event)" /><small>{{ materialFile()?.name || 'Choose a PDF, DOCX, PPTX, or TXT file' }}</small></label>
+          <label>Question paper pattern<select [ngModel]="generationTemplateId()" (ngModelChange)="selectGenerationTemplate($event)" [disabled]="templateState() !== 'loaded'">
+            <option value="" disabled>{{ templateState() === 'loading' ? 'Loading patterns...' : generationTemplates().length ? 'Select a pattern' : 'Create a pattern first' }}</option>
+            @for (template of generationTemplates(); track template.id) {
+              <option [value]="template.id">{{ template.name }} · {{ template.total_marks || template.marks || 1 }} total marks</option>
+            }
+          </select></label>
+          <div class="generation-fields">
+            <label>Difficulty<select [ngModel]="generationDifficulty()" (ngModelChange)="generationDifficulty.set($event)"><option>Easy</option><option>Medium</option><option>Hard</option></select></label>
+            <label>Bloom learning objective<select [ngModel]="generationBloom()" (ngModelChange)="generationBloom.set($event)"><option>Remember</option><option>Understand</option><option>Apply</option><option>Analyze</option><option>Evaluate</option><option>Create</option></select></label>
+          </div>
+          <button class="start-button" [disabled]="generationState() === 'generating' || !materialSubject() || !materialFile() || materialFileState() !== 'ready' || !generationTemplateId()" (click)="generateQuestions()">
+            {{ generationState() === 'generating' ? 'Processing book and generating...' : 'Generate question paper' }} <span>→</span>
+          </button>
+          <p class="practice-message" [class.error]="generationState() === 'error'" [class.success]="generationState() === 'done'">{{ generationMessage() }}</p>
+          @if (materialState() === 'processing') {
+            <p class="practice-message">{{ materialMessage() }}</p>
+          }
+        </div>
+      </section>
+      @if (generatedQuestions().length) {
+        <section class="candidate-section">
+          <div class="panel-heading"><div><p class="eyebrow">Review before saving</p><h2>Generated questions</h2></div><span class="term-badge">DRAFTS</span></div>
+          <div class="candidate-list">
+            @for (question of generatedQuestions(); track question.question_text) {
+              <article class="candidate-card">
+                <span class="metric-label">{{ question.question_type }} · {{ question.marks }} mark(s) · {{ question.difficulty }} · {{ question.bloom_level }}</span>
+                <h3>{{ question.question_text }}</h3>
+                @for (option of question.options; track option.key) { <p><b>{{ option.key }}</b> {{ option.text }}</p> }
+                <p>{{ question.explanation }}</p>
+                <button class="outline-button" (click)="saveGeneratedQuestion(question)">Save as draft</button>
+              </article>
+            }
+          </div>
+        </section>
+      }
+    } @else if (activeView() === 'Practice') {
       <section class="practice-view">
         <div class="practice-copy">
           <p class="eyebrow">Student workspace</p>
@@ -158,10 +239,11 @@
               >Subject<select
                 [ngModel]="practiceSubject()"
                 (ngModelChange)="practiceSubject.set($event)"
+                [disabled]="subjectState() === 'loading'"
               >
-                <option value="computer-science">Computer Science</option>
-                <option value="data-structures">Data Structures</option>
-                <option value="operating-systems">Operating Systems</option>
+                @for (subject of subjects(); track subject.id) {
+                  <option [value]="subject.id">{{ subject.code }} · {{ subject.name }}</option>
+                }
               </select></label
             ><label
               >Questions<select
@@ -196,14 +278,58 @@
           </div>
         }
       </section>
+    } @else if (activeView() === 'Patterns') {
+      <section class="review-view">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Question design</p>
+            <h2>Create reusable question patterns.</h2>
+          </div>
+          <span class="term-badge">PATTERN LIBRARY</span>
+        </div>
+        <div class="generation-panel">
+          <p>Define the complete paper blueprint. Mixed question types are allowed, and the section total must match the paper total.</p>
+          <label>Pattern name<input [ngModel]="patternName()" (ngModelChange)="patternName.set($event)" placeholder="e.g. Midterm mixed paper" /></label>
+          <label>Total paper marks<input type="number" min="1" [ngModel]="patternTotalMarks()" (ngModelChange)="patternTotalMarks.set(+$event)" /></label>
+          @for (section of patternSections(); track $index) {
+            <div class="generation-fields">
+              <label>Question type<select [ngModel]="section.question_type" (ngModelChange)="updatePatternSection($index, 'question_type', $event)">
+                <option>MCQ</option><option>Short Answer</option><option>Descriptive</option><option>Long Answer</option>
+              </select></label>
+              <label>Question style<select [ngModel]="section.pattern" (ngModelChange)="updatePatternSection($index, 'pattern', $event)">
+                <option>Direct Concept</option><option>Scenario Based</option><option>Numerical</option><option>Long Answer</option>
+              </select></label>
+              <label>Number<input type="number" min="1" [ngModel]="section.count" (ngModelChange)="updatePatternSection($index, 'count', $event)" /></label>
+              <label>Marks each<input type="number" min="1" [ngModel]="section.marks" (ngModelChange)="updatePatternSection($index, 'marks', $event)" /></label>
+              <button class="text-button" type="button" (click)="removePatternSection($index)">Remove</button>
+            </div>
+          }
+          <button class="outline-button" type="button" (click)="addPatternSection()">＋ Add question section</button>
+          <button class="start-button" [disabled]="patternState() === 'saving'" (click)="createPattern()">
+            {{ patternState() === 'saving' ? 'Creating...' : 'Create pattern' }} <span>→</span>
+          </button>
+          <p class="practice-message" [class.error]="patternState() === 'error'" [class.success]="patternState() === 'done'">{{ patternMessage() }}</p>
+        </div>
+        <div class="review-list">
+          @for (template of generationTemplates(); track template.id) {
+            <article class="review-card">
+              <span class="metric-label">{{ template.total_marks || template.marks }} total marks</span>
+              <h3>{{ template.name }}</h3>
+              @for (section of template.sections || []; track $index) {
+                <p>{{ section.count }} × {{ section.question_type }} · {{ section.marks }} mark(s) each</p>
+              }
+              <p>This paper pattern is available in Question paper generation.</p>
+            </article>
+          }
+        </div>
+      </section>
     } @else if (activeView() === 'Generate') {
       <section class="generation-view">
         <div class="generation-intro">
           <p class="eyebrow">Faculty workspace</p>
-          <h2>Generate grounded questions.</h2>
+          <h2>Generate a question paper.</h2>
           <p>
-            Use retrieved study material as context, then review every candidate before it enters
-            the question bank.
+            Select a saved mixed-question pattern and generate grounded candidates from your indexed book.
           </p>
           <div class="source-note">
             <span>01</span>
@@ -216,90 +342,9 @@
         </div>
         <div class="generation-panel">
           <label
-            >Template ID<input
+            >Question paper pattern<select
               [ngModel]="generationTemplateId()"
-              (ngModelChange)="generationTemplateId.set($event)"
-              placeholder="Paste an active template ID" /></label
-          ><label
-            >Source query<textarea
-              [ngModel]="generationQuery()"
-              (ngModelChange)="generationQuery.set($event)"
-              placeholder="What should the questions test?"
-              rows="3"
-            ></textarea>
-          </label>
-          <div class="generation-fields">
-            <label
-              >Difficulty<select
-                [ngModel]="generationDifficulty()"
-                (ngModelChange)="generationDifficulty.set($event)"
-              >
-                <option>Easy</option>
-                <option>Medium</option>
-                <option>Hard</option>
-              </select></label
-            ><label
-              >Bloom<select
-                [ngModel]="generationBloom()"
-                (ngModelChange)="generationBloom.set($event)"
-              >
-                <option>Remember</option>
-                <option>Understand</option>
-                <option>Apply</option>
-                <option>Analyze</option>
-                <option>Evaluate</option>
-                <option>Create</option>
-              </select></label
-            ><label
-              >Candidates<select
-                [ngModel]="generationCount()"
-                (ngModelChange)="generationCount.set(+$event)"
-              >
-                <option [value]="1">1</option>
-                <option [value]="3">3</option>
-                <option [value]="5">5</option>
-              </select></label
-            >
-          </div>
-          <button
-            class="start-button"
-            [disabled]="generationState() === 'generating'"
-            (click)="generateQuestions()"
-          >
-            {{ generationState() === 'generating' ? 'Generating...' : 'Generate questions' }}
-            <span>→</span>
-          </button>
-          <p
-            class="practice-message"
-            [class.error]="generationState() === 'error'"
-            [class.success]="generationState() === 'done'"
-          >
-            {{ generationMessage() }}
-          </p>
-        </div>
-      </section>
-      <section class="generation-view">
-        <div class="generation-intro">
-          <p class="eyebrow">Faculty workspace</p>
-          <h2>Generate grounded questions.</h2>
-          <p>
-            Use retrieved study material as context, then review every candidate before it enters
-            the question bank.
-          </p>
-          <div class="source-note">
-            <span>01</span>
-            <p>
-              <strong>Model</strong><br />{{
-                generationState() === 'error' ? 'Needs attention' : 'Deterministic baseline'
-              }}
-            </p>
-          </div>
-        </div>
-        <div class="generation-panel">
-          <label
-            >Question template<select
-              [ngModel]="generationTemplateId()"
-              (ngModelChange)="generationTemplateId.set($event)"
+              (ngModelChange)="selectGenerationTemplate($event)"
               [disabled]="templateState() !== 'loaded'"
             >
               <option value="" disabled>
@@ -314,14 +359,14 @@
                 }}
               </option>
               @for (template of generationTemplates(); track template.id) {
-                <option [value]="template.id">{{ template.name }} · {{ template.pattern }}</option>
+                <option [value]="template.id">{{ template.name }} · {{ template.total_marks || template.marks || 1 }} total marks</option>
               }
             </select></label
           ><label
             >Source query<textarea
               [ngModel]="generationQuery()"
               (ngModelChange)="generationQuery.set($event)"
-              placeholder="What should the questions test?"
+              placeholder="What chapter, unit, or topic should the paper test?"
               rows="3"
             ></textarea>
           </label>
@@ -336,7 +381,7 @@
                 <option>Hard</option>
               </select></label
             ><label
-              >Bloom<select
+              >Learning objective (Bloom)<select
                 [ngModel]="generationBloom()"
                 (ngModelChange)="generationBloom.set($event)"
               >
@@ -347,23 +392,14 @@
                 <option>Evaluate</option>
                 <option>Create</option>
               </select></label
-            ><label
-              >Candidates<select
-                [ngModel]="generationCount()"
-                (ngModelChange)="generationCount.set(+$event)"
-              >
-                <option [value]="1">1</option>
-                <option [value]="3">3</option>
-                <option [value]="5">5</option>
-              </select></label
-            >
+            ><span class="practice-message">Bloom keeps the paper aligned to a learning objective; difficulty controls challenge level.</span>
           </div>
           <button
             class="start-button"
             [disabled]="generationState() === 'generating' || !generationTemplateId()"
             (click)="generateQuestions()"
           >
-            {{ generationState() === 'generating' ? 'Generating...' : 'Generate questions' }}
+            {{ generationState() === 'generating' ? 'Generating...' : 'Generate question paper' }}
             <span>→</span>
           </button>
           <p
@@ -381,6 +417,7 @@
             <div>
               <p class="eyebrow">Human review required</p>
               <h2>Candidate questions</h2>
+              <p>Review here, then save drafts. Saved questions appear in Question bank for approval.</p>
             </div>
             <span class="term-badge">DRAFTS</span>
           </div>
@@ -519,6 +556,8 @@
                         ? 'Extracting text'
                         : materialStage() === 'chunking'
                           ? 'Creating retrieval chunks'
+                          : materialStage() === 'indexing'
+                            ? 'Indexing for retrieval'
                           : materialStage() === 'complete'
                             ? 'Processing complete'
                             : 'Processing failed'
@@ -544,11 +583,16 @@
                 </li>
                 <li
                   [class.active]="materialStage() === 'chunking'"
-                  [class.done]="materialProgress() === 100"
+                  [class.done]="materialProgress() >= 85"
                 >
                   Create chunks
                 </li>
-                <li [class.done]="materialStage() === 'complete'">Save metadata</li>
+                <li
+                  [class.active]="materialStage() === 'indexing'"
+                  [class.done]="materialStage() === 'complete'"
+                >
+                  Index for retrieval
+                </li>
               </ol>
             }
             <p
@@ -570,6 +614,58 @@
           ><span>{{ material.status }} · {{ material.size_bytes }} bytes</span>
         </section>
       }
+    } @else if (activeView() === 'Analytics') {
+      <section class="review-view">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Student performance</p>
+            <h2>Learn from every attempt.</h2>
+          </div>
+          <button class="outline-button" (click)="analyticsState.set('idle'); selectView('Analytics')">
+            Refresh
+          </button>
+        </div>
+        <p class="practice-message" [class.error]="analyticsState() === 'error'">
+          {{ analyticsMessage() }}
+        </p>
+        @if (studentAnalytics(); as analytics) {
+          <div class="metrics">
+            <article class="metric-card accent-teal">
+              <span class="metric-label">Average score</span><strong>{{ analytics.average_percentage }}%</strong>
+            </article>
+            <article class="metric-card accent-coral">
+              <span class="metric-label">Practice attempts</span><strong>{{ analytics.total_attempts }}</strong>
+            </article>
+            <article class="metric-card accent-gold">
+              <span class="metric-label">Questions answered</span><strong>{{ analytics.total_questions }}</strong>
+            </article>
+          </div>
+          <div class="dashboard-grid">
+            <article class="panel">
+              <div class="panel-heading"><h2>Weak topics</h2><span class="term-badge">LOWEST ACCURACY</span></div>
+              @if (analytics.weak_topics.length) {
+                @for (topic of analytics.weak_topics; track topic.topic_id) {
+                  <div class="activity">
+                    <span><strong>{{ topic.topic_id }}</strong><small>{{ topic.correct_answers }} / {{ topic.attempts }} correct</small></span>
+                    <strong>{{ topic.accuracy }}%</strong>
+                  </div>
+                }
+              } @else {
+                <p class="practice-message">Complete a practice test to identify weak topics.</p>
+              }
+            </article>
+            <article class="panel">
+              <div class="panel-heading"><h2>By difficulty</h2></div>
+              @for (item of difficultyAnalytics(); track item.difficulty) {
+                <div class="activity">
+                  <span><strong>{{ item.difficulty }}</strong><small>{{ item.attempts }} attempts</small></span>
+                  <strong>{{ item.accuracy }}%</strong>
+                </div>
+              }
+            </article>
+          </div>
+        }
+      </section>
     } @else if (activeView() === 'Question bank') {
       <section class="review-view">
         <div class="panel-heading">
@@ -676,10 +772,10 @@
       <section class="paper-view">
         <div class="paper-intro">
           <p class="eyebrow">Faculty workspace</p>
-          <h2>Compose the examination.</h2>
+          <h2>Publish approved examination papers.</h2>
           <p>
-            Turn an approved question bank into a balanced paper, then publish it when the blueprint
-            is ready.
+            This is the final publishing step after generated questions are reviewed and approved.
+            Use Generate for new content; use this page to assemble an approved bank for students.
           </p>
           <div class="source-note">
             <span>02</span>
@@ -721,6 +817,7 @@
               [ngModel]="paperCount()"
               (ngModelChange)="paperCount.set(+$event)"
             >
+              <option [value]="1">1 question</option>
               <option [value]="5">5 questions</option>
               <option [value]="10">10 questions</option>
               <option [value]="20">20 questions</option>
@@ -759,25 +856,25 @@
     } @else {
       <section class="welcome-row">
         <div>
-          <h2>Good morning, Dr. Rao.</h2>
-          <p>{{ apiMessage() }} Your assessment workspace is ready.</p>
+          <h2>Welcome back, {{ currentUser()?.display_name || 'Exam Studio user' }}.</h2>
+          <p>{{ dashboardMessage() }}</p>
         </div>
         <span class="term-badge">AUTUMN 2026 <b>•</b> TERM 1</span>
       </section>
       <section class="metrics" aria-label="Workspace summary">
         <article class="metric-card accent-teal">
-          <span class="metric-label">Questions generated</span><strong>1,248</strong
-          ><span class="trend positive">↗ 18.4% <em>vs last month</em></span>
+          <span class="metric-label">Draft questions</span><strong>{{ dashboardDraftCount() }}</strong
+          ><span class="trend neutral">Live review queue</span>
           <div class="sparkline teal"></div>
         </article>
         <article class="metric-card accent-coral">
-          <span class="metric-label">Awaiting review</span><strong>86</strong
-          ><span class="trend neutral">14 <em>due this week</em></span>
+          <span class="metric-label">Approved banks</span><strong>{{ dashboardBankCount() }}</strong
+          ><span class="trend neutral">Available for papers</span>
           <div class="sparkline coral"></div>
         </article>
         <article class="metric-card accent-gold">
-          <span class="metric-label">Published papers</span><strong>24</strong
-          ><span class="trend positive">↗ 6.2% <em>vs last month</em></span>
+          <span class="metric-label">Practice average</span><strong>{{ dashboardPracticeScore() === null ? '—' : dashboardPracticeScore() + '%' }}</strong
+          ><span class="trend neutral">From submitted tests</span>
           <div class="sparkline gold"></div>
         </article>
       </section>
@@ -791,23 +888,23 @@
             <button class="text-button">View all <span>→</span></button>
           </div>
           <div class="workflow-list">
-            <button class="workflow-item" (click)="selectView('Question bank')">
+            <button class="workflow-item" (click)="selectView('Question paper')">
               <span class="workflow-number">01</span
               ><span
-                ><strong>Review generated questions</strong
-                ><small>86 questions are waiting for your decision</small></span
+                ><strong>Upload and generate</strong
+                ><small>Upload a book, choose a pattern, and generate grounded questions</small></span
               ><span class="workflow-arrow">→</span></button
-            ><button class="workflow-item" (click)="selectView('Model papers')">
+            ><button class="workflow-item" (click)="selectView('Patterns')">
               <span class="workflow-number">02</span
               ><span
-                ><strong>Build a model paper</strong
-                ><small>Use approved questions from 3 subject banks</small></span
+                ><strong>Define a paper pattern</strong
+                ><small>Mix question types and match the total marks</small></span
               ><span class="workflow-arrow">→</span></button
-            ><button class="workflow-item" (click)="selectView('Materials')">
+            ><button class="workflow-item" (click)="selectView('Question paper')">
               <span class="workflow-number">03</span
               ><span
-                ><strong>Upload study material</strong
-                ><small>Keep your source library current</small></span
+                ><strong>Review and save drafts</strong
+                ><small>Check generated questions before approval</small></span
               ><span class="workflow-arrow">→</span>
             </button>
           </div>

@@ -98,9 +98,13 @@ class RetrievalService:
         self.vector_store = MongoVectorStore(database)
 
     def index_material(self, material_id: str) -> int:
-        if not self.database.study_materials.find_one({"_id": material_id}):
+        material = self.database.study_materials.find_one({"_id": material_id})
+        if material is None:
+            material = self.database.study_materials.find_one({"id": material_id})
+        if material is None:
             raise ValueError("Material not found.")
-        chunks = self.database.document_chunks.find({"study_material_id": material_id})
+        resolved_material_id = str(material.get("id", material.get("_id", material_id)))
+        chunks = self.database.document_chunks.find({"study_material_id": resolved_material_id})
         count = 0
         for item in chunks:
             chunk = DocumentChunkDocument.model_validate(item)
@@ -109,7 +113,11 @@ class RetrievalService:
             self.vector_store.upsert(chunk)
             count += 1
         if count:
-            self.database.study_materials.update_one({"_id": material_id}, {"$set": {"status": "indexed"}})
+            material_key = "id" if material.get("id") else "_id"
+            self.database.study_materials.update_one(
+                {material_key: material.get(material_key, material_id)},
+                {"$set": {"status": "indexed"}},
+            )
         return count
 
     def retrieve(
@@ -134,3 +142,28 @@ class RetrievalService:
         }
         query_embedding = self.embedding_provider.embed(query)
         return self.vector_store.search(query_embedding, top_k=top_k, filters=filters)
+
+    def retrieve_all(
+        self,
+        *,
+        subject_id: str | None = None,
+        course_id: str | None = None,
+        syllabus_id: str | None = None,
+        topic_id: str | None = None,
+    ) -> list[dict]:
+        filters = {
+            key: value
+            for key, value in {
+                "subject_id": subject_id,
+                "course_id": course_id,
+                "syllabus_id": syllabus_id,
+                "topic_id": topic_id,
+            }.items()
+            if value is not None
+        }
+        query = {"embedding": {"$exists": True, "$ne": None}}
+        query.update({f"metadata.{key}": value for key, value in filters.items()})
+        return [
+            {"chunk": DocumentChunkDocument.model_validate(item), "score": 1.0}
+            for item in self.database.document_chunks.find(query).sort("chunk_index", 1)
+        ]

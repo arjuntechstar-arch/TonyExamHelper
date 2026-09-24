@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Phase 15
+
+- Completed the README, API contract, environment, and deployment guidance.
+- Added non-secret Docker Compose configuration, a Docker build context
+  exclusion file, and GitHub Actions validation for backend and frontend.
+
 ### Phase 4
 
 - Added faculty/admin-protected subject, course, syllabus, and syllabus-topic API endpoints.

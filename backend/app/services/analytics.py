@@ -22,14 +22,19 @@ class AnalyticsService:
                 "weak_topics": [],
             }
 
-        answers = list(self.database.student_answers.find({"practice_test_id": {"$in": [test["_id"] for test in tests]}}))
+        test_ids = [str(test.get("_id", test.get("id"))) for test in tests]
+        answers = list(
+            self.database.student_answers.find(
+                {"practice_test_id": {"$in": test_ids}}
+            )
+        )
         total_questions = len(answers)
         correct_answers = sum(1 for answer in answers if answer.get("is_correct") is True)
         average_percentage = round((correct_answers / total_questions) * 100, 2) if total_questions else 0.0
 
         topic_stats = defaultdict(lambda: {"score": 0, "attempts": 0, "correct": 0})
         for answer in answers:
-            question = self.database.questions.find_one({"_id": answer["question_id"]})
+            question = self._find_by_id(self.database.questions, answer["question_id"])
             if not question:
                 continue
             topic_id = question.get("topic_id") or "unassigned"
@@ -58,9 +63,10 @@ class AnalyticsService:
 
         topic_stats = defaultdict(lambda: {"attempts": 0, "correct": 0})
         for test in tests:
-            answers = list(self.database.student_answers.find({"practice_test_id": test["_id"]}))
+            test_id = str(test.get("_id", test.get("id")))
+            answers = list(self.database.student_answers.find({"practice_test_id": test_id}))
             for answer in answers:
-                question = self.database.questions.find_one({"_id": answer["question_id"]})
+                question = self._find_by_id(self.database.questions, answer["question_id"])
                 if not question:
                     continue
                 topic_id = question.get("topic_id") or "unassigned"
@@ -87,9 +93,10 @@ class AnalyticsService:
 
         difficulty_stats = defaultdict(lambda: {"attempts": 0, "correct": 0})
         for test in tests:
-            answers = list(self.database.student_answers.find({"practice_test_id": test["_id"]}))
+            test_id = str(test.get("_id", test.get("id")))
+            answers = list(self.database.student_answers.find({"practice_test_id": test_id}))
             for answer in answers:
-                question = self.database.questions.find_one({"_id": answer["question_id"]})
+                question = self._find_by_id(self.database.questions, answer["question_id"])
                 if not question:
                     continue
                 difficulty = question.get("difficulty") or "Unknown"
@@ -108,6 +115,11 @@ class AnalyticsService:
                 key=lambda item: ((item[1]["correct"] / item[1]["attempts"]) if item[1]["attempts"] else 1.0, item[1]["attempts"]),
             )
         ]
+
+    @staticmethod
+    def _find_by_id(collection: Any, document_id: str) -> dict | None:
+        document = collection.find_one({"_id": document_id})
+        return document if document is not None else collection.find_one({"id": document_id})
 
 
 def get_student_analytics(student_id: str, database: Database) -> dict[str, Any]:
