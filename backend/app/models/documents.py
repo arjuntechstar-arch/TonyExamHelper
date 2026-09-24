@@ -79,9 +79,38 @@ class QuestionTemplateDocument(AuditDocument):
 
 class QuestionDocument(AuditDocument):
     question_type: str
+    pattern: str
     question_text: str
+    options: list[dict[str, str]] = Field(default_factory=list)
+    correct_answer: str | None = None
+    explanation: str
     difficulty: str
     bloom_level: str
+    sources: list[dict[str, str | int]] = Field(default_factory=list)
+    template_id: str | None = None
+    subject_id: str | None = None
+    syllabus_id: str | None = None
+    topic_id: str | None = None
+    review_status: str = "draft"
+    review_note: str | None = None
+
+
+class QuestionBankDocument(AuditDocument):
+    name: str = Field(min_length=1, max_length=150)
+    description: str | None = None
+    subject_id: str
+    question_ids: list[str] = Field(default_factory=list)
+    approval_status: str = "draft"
+
+
+class ModelPaperDocument(AuditDocument):
+    name: str = Field(min_length=1, max_length=150)
+    subject_id: str
+    question_bank_id: str
+    question_ids: list[str] = Field(min_length=1)
+    question_count: int = Field(ge=1)
+    blueprint: dict[str, dict[str, int]] = Field(default_factory=dict)
+    publication_status: str = "draft"
 
 
 class PracticeTestDocument(AuditDocument):

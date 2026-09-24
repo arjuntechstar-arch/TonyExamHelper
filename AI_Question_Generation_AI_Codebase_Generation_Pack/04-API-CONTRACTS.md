@@ -24,11 +24,19 @@ PUT /templates/{id}
 
 POST /questions/generate
 POST /questions/generate/batch
+POST /questions
+GET /questions/review
 POST /questions/{id}/validate
+POST /questions/{id}/approve
+POST /questions/{id}/reject
 
 GET /question-bank
 POST /question-bank
 POST /question-bank/{id}/approve
+
+POST /model-papers
+GET /model-papers/{id}
+POST /model-papers/{id}/publish
 
 POST /practice/start
 POST /practice/{id}/submit

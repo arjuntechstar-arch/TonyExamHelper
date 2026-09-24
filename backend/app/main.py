@@ -15,6 +15,8 @@ from app.api.materials import router as materials_router
 from app.api.retrieval import router as retrieval_router
 from app.api.templates import router as templates_router
 from app.api.questions import router as questions_router
+from app.api.question_bank import router as question_bank_router
+from app.api.model_papers import router as model_papers_router
 from app.api.errors import ErrorResponse
 from app.core.config import get_settings
 from app.core.logging import configure_logging, correlation_id
@@ -59,6 +61,8 @@ app.include_router(materials_router, prefix=settings.api_prefix)
 app.include_router(retrieval_router, prefix=settings.api_prefix)
 app.include_router(templates_router, prefix=settings.api_prefix)
 app.include_router(questions_router, prefix=settings.api_prefix)
+app.include_router(question_bank_router, prefix=settings.api_prefix)
+app.include_router(model_papers_router, prefix=settings.api_prefix)
 
 
 def error_response(
