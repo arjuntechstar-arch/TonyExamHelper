@@ -20,3 +20,20 @@ nav { display: grid; gap: .3rem; }.nav-item { display: flex; align-items: center
 @media (max-width: 850px) { .sidebar { width: 74px; flex-basis: 74px; padding: 1.5rem .7rem; }.brand-mark { padding: 0 0 2rem; }.brand-mark div, .workspace-label, .nav-item:not(.active)::after, .nav-item { font-size: 0; }.nav-item { justify-content: center; padding: .8rem; }.nav-icon { font-size: 1rem; }.sidebar-footer .api-pill span:last-child, .profile strong, .profile small, .more { display: none; }.profile { justify-content: center; }.content { padding: 2rem 1.2rem; } }
 @media (max-width: 620px) { .topbar, .welcome-row { align-items: flex-start; gap: 1rem; flex-direction: column; }.top-actions { align-self: stretch; justify-content: flex-end; }.metrics, .dashboard-grid { grid-template-columns: 1fr; }.term-badge { align-self: flex-start; }.panel { padding: 1.2rem; } }
 @media (max-width: 620px) { .practice-view, .generation-view, .operations-view, .paper-view, .bank-builder-grid { grid-template-columns: 1fr; gap: 1rem; margin: 3rem auto; }.generation-fields { grid-template-columns: 1fr; }.status-strip { align-items: flex-start; gap: .5rem; flex-direction: column; } }
+.generation-trace {
+  max-height: 12rem;
+  overflow-y: auto;
+  margin-top: .6rem;
+  padding: .5rem;
+  border: 1px solid #d8e4dc;
+  border-radius: 6px;
+  background: #f5f8f4;
+  color: #426158;
+  font-size: .72rem;
+}
+
+.generation-trace strong {
+  display: block;
+  margin-bottom: .25rem;
+  color: #173f43;
+}

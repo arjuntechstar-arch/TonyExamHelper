@@ -143,6 +143,14 @@
             {{ generationState() === 'generating' ? 'Processing book and generating...' : 'Generate question paper' }} <span>→</span>
           </button>
           <p class="practice-message" [class.error]="generationState() === 'error'" [class.success]="generationState() === 'done'">{{ generationMessage() }}</p>
+          @if (generationState() === 'generating' || generationLogs().length) {
+            <div class="generation-trace">
+              <strong>Background progress · {{ generationStage() }}</strong>
+              @for (log of generationLogs(); track $index) {
+                <div>{{ log }}</div>
+              }
+            </div>
+          }
           @if (materialState() === 'processing') {
             <p class="practice-message">{{ materialMessage() }}</p>
           }

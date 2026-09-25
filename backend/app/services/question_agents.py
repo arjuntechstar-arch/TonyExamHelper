@@ -90,8 +90,8 @@ class QuestionGenerationGraph:
         self,
         provider: LLMProvider | None = None,
         *,
-        max_retries: int = 2,
-        max_attempts_per_question: int = 4,
+        max_retries: int = 1,
+        max_attempts_per_question: int = 2,
     ) -> None:
         self.generator = GenerationService(provider=provider, max_retries=max_retries)
         self.preparer = QuestionPreparingAgent(self.generator)
@@ -108,6 +108,7 @@ class QuestionGenerationGraph:
         bloom_level: str,
         candidate_count: int = 1,
         existing_questions: list[GeneratedQuestion] | None = None,
+        trace=None,
     ) -> list[GeneratedQuestion]:
         if candidate_count < 1 or candidate_count > 20:
             raise GenerationError("candidate_count must be between 1 and 20.")
@@ -115,8 +116,12 @@ class QuestionGenerationGraph:
         accepted = list(existing_questions or [])
         rejected: list[str] = []
         for candidate_index in range(candidate_count):
+            if trace:
+                trace(f"Preparing candidate {candidate_index + 1}/{candidate_count}.", stage="preparing")
             question: GeneratedQuestion | None = None
             for attempt in range(self.max_attempts_per_question):
+                if trace:
+                    trace(f"Calling model for candidate {candidate_index + 1}, attempt {attempt + 1}.", stage="model")
                 try:
                     question = self.preparer.prepare(
                         template=template,
@@ -129,6 +134,11 @@ class QuestionGenerationGraph:
                     rejected.append(str(error))
                     continue
                 issues = self.pattern_validator.validate(question, template)
+                if trace:
+                    trace(
+                        f"Pattern validation: {'passed' if not issues else ', '.join(issue.code for issue in issues)}.",
+                        stage="pattern_validation",
+                    )
                 if not issues:
                     issues = self.question_validator.validate(
                         question,
@@ -136,6 +146,11 @@ class QuestionGenerationGraph:
                         context=context,
                         existing_questions=accepted,
                     )
+                    if trace:
+                        trace(
+                            f"Question validation: {'passed' if not issues else '; '.join(f'{issue.code}: {issue.message}' for issue in issues)}.",
+                            stage="question_validation",
+                        )
                 if not issues:
                     accepted.append(question)
                     break
@@ -144,6 +159,6 @@ class QuestionGenerationGraph:
                 continue
         generated = accepted[len(existing_questions or []):]
         if not generated:
-            detail = ", ".join(rejected[-5:]) or "No candidate passed validation."
+            detail = "; ".join(rejected[-5:]) or "No candidate passed validation."
             raise GenerationError(f"Question generation failed validation: {detail}")
         return generated

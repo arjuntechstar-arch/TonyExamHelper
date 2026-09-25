@@ -4,7 +4,7 @@ from fastapi import HTTPException
 
 from app.api.questions import GenerateRequest, generate_questions
 from app.models import DocumentChunkDocument, QuestionTemplateDocument
-from app.services.generation import DeterministicLLMProvider, GenerationError, GenerationService
+from app.services.generation import DeterministicLLMProvider, GenerationError, GenerationService, NvidiaProvider
 
 
 def template() -> QuestionTemplateDocument:
@@ -112,3 +112,31 @@ def test_question_generation_requires_indexed_source_chunks() -> None:
             ),
             database,
         )
+
+
+def test_nvidia_provider_parses_non_streaming_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"question_text":"What is a tree?","options":[{"key":"A","text":"A data structure"}],"correct_answer":"A","explanation":"The source defines it.","difficulty":"Medium","bloom_level":"Apply","sources":[{"chunk_id":"chunk-1","page":1}]}'
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(*args: object, **kwargs: object) -> Response:
+        assert args[0] == "https://integrate.api.nvidia.com/v1/chat/completions"
+        assert kwargs["headers"]["Authorization"] == "Bearer test-key"
+        assert kwargs["json"]["stream"] is False
+        return Response()
+
+    monkeypatch.setattr("app.services.generation.httpx.post", fake_post)
+    result = NvidiaProvider("test-key").generate_structured("prompt")
+
+    assert result["question_text"] == "What is a tree?"

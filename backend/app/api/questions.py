@@ -8,8 +8,9 @@ from app.api.auth import require_roles
 from app.core.database import get_database
 from app.core.config import Settings, get_settings
 from app.models import QuestionDocument, QuestionTemplateDocument, UserDocument
-from app.services.generation import GeneratedQuestion, GenerationError, OpenAICompatibleProvider, OpenRouterProvider
+from app.services.generation import GeneratedQuestion, GenerationError, NvidiaProvider, OpenAICompatibleProvider, OpenRouterProvider
 from app.services.question_agents import QuestionGenerationGraph
+from app.services.generation_runs import generation_runs, GenerationRun
 from app.services.quality import QuestionQualityService, ValidationResult
 from app.services.retrieval import RetrievalService
 
@@ -139,6 +140,7 @@ def generate_paper(
     payload: PaperGenerateRequest,
     database: Database = Depends(get_database),
     _: UserDocument = QuestionUser,
+    trace=None,
 ) -> list[GeneratedQuestion]:
     template_data = database.question_templates.find_one({"_id": payload.template_id, "status": "active"})
     if not template_data:
@@ -151,6 +153,8 @@ def generate_paper(
             syllabus_id=payload.syllabus_id,
             topic_id=payload.topic_id,
         )
+        if trace:
+            trace(f"Retrieved {len(chunks)} indexed source chunks.", stage="retrieval")
         if not chunks:
             raise HTTPException(status_code=422, detail="No indexed source chunks are available for this material. Upload the material and try again.")
         generated: list[GeneratedQuestion] = []
@@ -182,11 +186,38 @@ def generate_paper(
                     bloom_level=payload.bloom_level,
                     candidate_count=int(section["count"]),
                     existing_questions=existing_questions + generated,
+                    trace=trace,
                 )
             )
         return generated
     except (GenerationError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.post("/generate/paper/start")
+def start_generate_paper(
+    payload: PaperGenerateRequest,
+    database: Database = Depends(get_database),
+    _: UserDocument = QuestionUser,
+) -> dict:
+    def worker(run: GenerationRun) -> list[dict]:
+        run.log("Retrieving indexed source context.", stage="retrieval")
+        questions = generate_paper(payload, database, trace=run.log)
+        return [question.model_dump() for question in questions]
+
+    run = generation_runs.create(worker)
+    return run.snapshot()
+
+
+@router.get("/generate/runs/{run_id}")
+def get_generation_run(
+    run_id: str,
+    _: UserDocument = QuestionUser,
+) -> dict:
+    run = generation_runs.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found.")
+    return run.snapshot()
 
 
 def _configured_provider(settings: Settings):
@@ -199,6 +230,13 @@ def _configured_provider(settings: Settings):
         )
     if settings.llm_provider.lower() == "openai" and settings.openai_api_key:
         return OpenAICompatibleProvider(settings.openai_api_key, settings.openai_model)
+    if settings.llm_provider.lower() in {"nvidia", "nvidia-nim", "kimi-k3"} and settings.nvidia_api_key:
+        return NvidiaProvider(
+            settings.nvidia_api_key,
+            settings.nvidia_model,
+            settings.nvidia_base_url,
+            settings.nvidia_timeout_seconds,
+        )
     return None
 
 

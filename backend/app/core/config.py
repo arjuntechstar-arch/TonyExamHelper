@@ -25,7 +25,11 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_model: str = "openrouter/auto"
     openrouter_app_name: str = "Atlas Exam Studio"
-    openrouter_timeout_seconds: int = Field(default=120, ge=10, le=300)
+    openrouter_timeout_seconds: int = Field(default=30, ge=10, le=300)
+    nvidia_api_key: str | None = None
+    nvidia_model: str = "moonshotai/kimi-k3"
+    nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
+    nvidia_timeout_seconds: int = Field(default=60, ge=10, le=300)
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[3] / ".env",

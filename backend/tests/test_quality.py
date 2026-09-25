@@ -2,7 +2,7 @@ import pytest
 
 from app.models import QuestionTemplateDocument
 from app.services.generation import GeneratedQuestion, QuestionOption, QuestionSource
-from app.services.quality import QualityConfig, QuestionQualityService, lexical_similarity
+from app.services.quality import QualityConfig, QuestionQualityService, context_relevance, lexical_similarity
 
 
 def template() -> QuestionTemplateDocument:
@@ -66,3 +66,20 @@ def test_quality_flags_semantic_duplicate_using_similarity_threshold() -> None:
     assert result.valid is False
     assert any(issue.code == "duplicate" for issue in result.issues)
     assert lexical_similarity("binary tree", "binary tree") == pytest.approx(1.0)
+
+
+def test_relevance_uses_best_chunk_for_long_retrieved_context() -> None:
+    long_context = [
+        "A binary search tree places smaller values in the left subtree. "
+        + "Additional unrelated textbook content. " * 80,
+        "A separate chapter discusses graph traversal and hashing.",
+    ]
+
+    result = QuestionQualityService().validate(
+        question(),
+        template=template(),
+        context=long_context,
+    )
+
+    assert context_relevance(question(), long_context) >= 0.08
+    assert result.valid is True

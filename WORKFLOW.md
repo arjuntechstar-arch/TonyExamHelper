@@ -50,15 +50,15 @@ Question generation uses the configured provider:
 LLM_PROVIDER=deterministic
 ```
 
-For OpenRouter:
+For NVIDIA NIM with Kimi K3:
 
 ```env
-LLM_PROVIDER=openrouter
-OPENROUTER_MODEL=openrouter/auto
-OPENROUTER_API_KEY=replace-with-a-new-key
+LLM_PROVIDER=nvidia
+NVIDIA_MODEL=moonshotai/kimi-k3
+NVIDIA_API_KEY=replace-with-your-nvidia-key
 ```
 
-ChatGPT Plus is separate from API access. OpenRouter and OpenAI API calls require their own API credentials.
+Hosted providers require their own API credentials. Never commit provider keys to source control.
 
 ## Local verification
 

@@ -82,6 +82,15 @@ interface GeneratedQuestion {
   pattern?: string;
 }
 
+interface GenerationRunStatus {
+  status: string;
+  stage: string;
+  message: string;
+  logs: string[];
+  result: GeneratedQuestion[] | null;
+  error: string | null;
+}
+
 interface ReviewQuestion {
   id: string;
   _id?: string;
@@ -197,6 +206,8 @@ export class App {
   protected readonly generationMessage = signal(
     'Upload and index a book, select a paper pattern, choose difficulty, then generate.',
   );
+  protected readonly generationStage = signal('idle');
+  protected readonly generationLogs = signal<string[]>([]);
   protected readonly generationState = signal<'ready' | 'generating' | 'saving' | 'done' | 'error'>(
     'ready',
   );
@@ -230,7 +241,14 @@ export class App {
   protected readonly materialError = signal('');
   protected readonly materialProgress = signal(0);
   protected readonly materialStage = signal<
-    'idle' | 'validating' | 'uploading' | 'extracting' | 'chunking' | 'indexing' | 'complete' | 'failed'
+    | 'idle'
+    | 'validating'
+    | 'uploading'
+    | 'extracting'
+    | 'chunking'
+    | 'indexing'
+    | 'complete'
+    | 'failed'
   >('idle');
   protected readonly uploadedMaterial = signal<MaterialResponse | null>(null);
   protected readonly subjects = signal<Subject[]>([]);
@@ -303,36 +321,45 @@ export class App {
   }
 
   private async loadDashboard(): Promise<void> {
-      const user = this.currentUser();
-      if (!user) {
-        this.dashboardState.set('error');
-        this.dashboardMessage.set('Sign in to load live workspace data.');
-        return;
-      }
-      this.dashboardState.set('loading');
-      try {
-        if (user.roles.some((role) => role === 'faculty' || role === 'admin')) {
-          const [drafts, banks] = await Promise.all([
-            firstValueFrom(this.http.get<ReviewQuestion[]>('/api/questions/review?review_status=draft', { headers: this.authHeaders() })),
-            firstValueFrom(this.http.get<QuestionBank[]>('/api/question-bank', { headers: this.authHeaders() })),
-          ]);
-          this.dashboardDraftCount.set(drafts.length);
-          this.dashboardBankCount.set(banks.length);
-        } else {
-          const overview = await firstValueFrom(
-            this.http.get<StudentAnalytics>(`/api/analytics/student?student_id=${encodeURIComponent(user.id)}`, {
+    const user = this.currentUser();
+    if (!user) {
+      this.dashboardState.set('error');
+      this.dashboardMessage.set('Sign in to load live workspace data.');
+      return;
+    }
+    this.dashboardState.set('loading');
+    try {
+      if (user.roles.some((role) => role === 'faculty' || role === 'admin')) {
+        const [drafts, banks] = await Promise.all([
+          firstValueFrom(
+            this.http.get<ReviewQuestion[]>('/api/questions/review?review_status=draft', {
               headers: this.authHeaders(),
             }),
-          );
-          this.dashboardPracticeScore.set(overview.average_percentage);
-        }
-        this.dashboardState.set('loaded');
-        this.dashboardMessage.set('Live data from your connected workspace.');
-      } catch {
-        this.dashboardState.set('error');
-        this.dashboardMessage.set('Some workspace data could not be loaded.');
+          ),
+          firstValueFrom(
+            this.http.get<QuestionBank[]>('/api/question-bank', { headers: this.authHeaders() }),
+          ),
+        ]);
+        this.dashboardDraftCount.set(drafts.length);
+        this.dashboardBankCount.set(banks.length);
+      } else {
+        const overview = await firstValueFrom(
+          this.http.get<StudentAnalytics>(
+            `/api/analytics/student?student_id=${encodeURIComponent(user.id)}`,
+            {
+              headers: this.authHeaders(),
+            },
+          ),
+        );
+        this.dashboardPracticeScore.set(overview.average_percentage);
       }
+      this.dashboardState.set('loaded');
+      this.dashboardMessage.set('Live data from your connected workspace.');
+    } catch {
+      this.dashboardState.set('error');
+      this.dashboardMessage.set('Some workspace data could not be loaded.');
     }
+  }
 
   protected selectView(view: string): void {
     this.activeView.set(view);
@@ -341,7 +368,8 @@ export class App {
     }
     if (view === 'Question paper') {
       if (this.subjectState() === 'idle') void this.loadSubjects();
-      if (this.currentUser() && this.templateState() === 'idle') void this.loadGenerationTemplates();
+      if (this.currentUser() && this.templateState() === 'idle')
+        void this.loadGenerationTemplates();
     }
     if (view === 'Generate' && this.templateState() === 'idle') {
       void this.loadGenerationTemplates();
@@ -377,9 +405,24 @@ export class App {
     try {
       const headers = { headers: this.authHeaders() };
       const [overview, topics, difficulties] = await Promise.all([
-        firstValueFrom(this.http.get<StudentAnalytics>(`/api/analytics/student?student_id=${encodeURIComponent(user.id)}`, headers)),
-        firstValueFrom(this.http.get<AnalyticsBreakdown[]>(`/api/analytics/student/topics?student_id=${encodeURIComponent(user.id)}`, headers)),
-        firstValueFrom(this.http.get<AnalyticsBreakdown[]>(`/api/analytics/student/difficulty?student_id=${encodeURIComponent(user.id)}`, headers)),
+        firstValueFrom(
+          this.http.get<StudentAnalytics>(
+            `/api/analytics/student?student_id=${encodeURIComponent(user.id)}`,
+            headers,
+          ),
+        ),
+        firstValueFrom(
+          this.http.get<AnalyticsBreakdown[]>(
+            `/api/analytics/student/topics?student_id=${encodeURIComponent(user.id)}`,
+            headers,
+          ),
+        ),
+        firstValueFrom(
+          this.http.get<AnalyticsBreakdown[]>(
+            `/api/analytics/student/difficulty?student_id=${encodeURIComponent(user.id)}`,
+            headers,
+          ),
+        ),
       ]);
       this.studentAnalytics.set(overview);
       this.topicAnalytics.set(topics);
@@ -388,7 +431,9 @@ export class App {
       this.analyticsMessage.set('Performance is calculated from submitted practice answers.');
     } catch {
       this.analyticsState.set('error');
-      this.analyticsMessage.set('Analytics could not be loaded. Try again after completing a practice test.');
+      this.analyticsMessage.set(
+        'Analytics could not be loaded. Try again after completing a practice test.',
+      );
     }
   }
 
@@ -406,7 +451,10 @@ export class App {
       if (!this.materialSubject() && subjects.length) {
         this.selectMaterialSubject(subjects[0].id);
       }
-      if (!this.practiceSubject() || !subjects.some((subject) => subject.id === this.practiceSubject())) {
+      if (
+        !this.practiceSubject() ||
+        !subjects.some((subject) => subject.id === this.practiceSubject())
+      ) {
         this.practiceSubject.set(subjects[0]?.id ?? '');
       }
       this.subjectState.set('idle');
@@ -466,7 +514,9 @@ export class App {
       const banks = await firstValueFrom(
         this.http.get<QuestionBank[]>('/api/question-bank', { headers: this.authHeaders() }),
       );
-      const approved = banks.map((bank) => normalizeId(bank)).filter((bank) => bank.approval_status === 'approved');
+      const approved = banks
+        .map((bank) => normalizeId(bank))
+        .filter((bank) => bank.approval_status === 'approved');
       this.questionBanks.set(approved);
       if (!this.paperBankId() && approved.length) {
         this.paperBankId.set(approved[0].id);
@@ -761,15 +811,15 @@ export class App {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  private extractErrorMessage(error: unknown, fallback = 'The backend could not complete this operation.'): string {
+  private extractErrorMessage(
+    error: unknown,
+    fallback = 'The backend could not complete this operation.',
+  ): string {
     if (typeof error === 'object' && error !== null && 'error' in error) {
-      const responseError = (error as { error?: { message?: string; detail?: string } | string }).error;
+      const responseError = (error as { error?: { message?: string; detail?: string } | string })
+        .error;
       if (typeof responseError === 'string') return responseError;
-      return (
-        responseError?.message ??
-        responseError?.detail ??
-        fallback
-      );
+      return responseError?.message ?? responseError?.detail ?? fallback;
     }
     return fallback;
   }
@@ -809,10 +859,15 @@ export class App {
       this.patternMessage.set('Enter a pattern name.');
       return;
     }
-    const total = this.patternSections().reduce((sum, section) => sum + section.count * section.marks, 0);
+    const total = this.patternSections().reduce(
+      (sum, section) => sum + section.count * section.marks,
+      0,
+    );
     if (total !== this.patternTotalMarks()) {
       this.patternState.set('error');
-      this.patternMessage.set(`Section marks total ${total}, but the paper total is ${this.patternTotalMarks()}.`);
+      this.patternMessage.set(
+        `Section marks total ${total}, but the paper total is ${this.patternTotalMarks()}.`,
+      );
       return;
     }
     this.patternState.set('saving');
@@ -826,7 +881,14 @@ export class App {
             pattern: this.patternSections()[0].pattern,
             required_fields: ['question_text', 'explanation'],
             supported_difficulties: ['Easy', 'Medium', 'Hard'],
-            supported_bloom_levels: ['Remember', 'Understand', 'Apply', 'Analyze', 'Evaluate', 'Create'],
+            supported_bloom_levels: [
+              'Remember',
+              'Understand',
+              'Apply',
+              'Analyze',
+              'Evaluate',
+              'Create',
+            ],
             version: '1.0',
             marks: this.patternSections()[0].marks,
             sections: this.patternSections(),
@@ -867,7 +929,9 @@ export class App {
 
   protected removePatternSection(index: number): void {
     if (this.patternSections().length === 1) return;
-    this.patternSections.update((sections) => sections.filter((_, sectionIndex) => sectionIndex !== index));
+    this.patternSections.update((sections) =>
+      sections.filter((_, sectionIndex) => sectionIndex !== index),
+    );
   }
 
   protected selectGenerationTemplate(templateId: string): void {
@@ -1021,11 +1085,13 @@ export class App {
       }
     }
     this.generationState.set('generating');
-    this.generationMessage.set('Retrieving source context and generating candidates...');
+    this.generationMessage.set('Starting generation worker...');
+    this.generationStage.set('starting');
+    this.generationLogs.set([]);
     try {
-      const questions = await firstValueFrom(
-        this.http.post<GeneratedQuestion[]>(
-          '/api/questions/generate/paper',
+      const run = await firstValueFrom(
+        this.http.post<{ id: string }>(
+          '/api/questions/generate/paper/start',
           {
             template_id: this.generationTemplateId(),
             difficulty: this.generationDifficulty(),
@@ -1036,6 +1102,22 @@ export class App {
           { headers: this.authHeaders() },
         ),
       );
+      let status: GenerationRunStatus;
+      do {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        status = await firstValueFrom(
+          this.http.get<GenerationRunStatus>(`/api/questions/generate/runs/${run.id}`, {
+            headers: this.authHeaders(),
+          }),
+        );
+        this.generationStage.set(status.stage);
+        this.generationMessage.set(status.message);
+        this.generationLogs.set(status.logs);
+      } while (status.status === 'queued' || status.status === 'running');
+      if (status.status !== 'completed' || !status.result) {
+        throw new Error(status.error || status.message || 'Generation failed.');
+      }
+      const questions = status.result;
       this.generatedQuestions.set(questions);
       this.generationState.set('done');
       this.generationMessage.set(
@@ -1044,10 +1126,12 @@ export class App {
       this.activeView.set('Generated questions');
     } catch (error: unknown) {
       this.generationState.set('error');
-      this.generationMessage.set(this.extractErrorMessage(
-        error,
-        'Generation failed. Upload and index material, then select a valid pattern and source topic.',
-      ));
+      this.generationMessage.set(
+        this.extractErrorMessage(
+          error,
+          'Generation failed. Upload and index material, then select a valid pattern and source topic.',
+        ),
+      );
     }
   }
 

@@ -59,7 +59,7 @@ The default configuration uses:
 - MONGODB_URL=mongodb://localhost:27017/
 - MONGODB_DATABASE=ai_examination_studio
 - JWT_SECRET_KEY must be set for authenticated endpoints
-- LLM_PROVIDER defaults to `deterministic`; set it to `openai` and provide `OPENAI_API_KEY` to use the OpenAI API
+- LLM_PROVIDER defaults to `deterministic`; set it to `nvidia` and provide `NVIDIA_API_KEY` to use NVIDIA NIM with `moonshotai/kimi-k3`
 
 ChatGPT Plus is a consumer subscription and does not provide API access automatically. OpenAI API usage requires a separate API key and billing account. The local deterministic provider is therefore the default and requires no external key.
 
@@ -74,6 +74,15 @@ The API will be available at:
 - health: http://localhost:8000/api/health
 - docs: http://localhost:8000/docs
 - redoc: http://localhost:8000/redoc
+
+During local question-paper generation, the frontend starts a background run and
+polls its progress. The generation panel shows retrieval, model, pattern
+validation, question validation, retries, and the exact rejection message.
+Structured backend logs are printed in the Uvicorn terminal as JSON. The
+development status endpoints are:
+
+- `POST /api/questions/generate/paper/start`
+- `GET /api/questions/generate/runs/{run_id}`
 
 ### 4) Start the frontend
 

@@ -23,7 +23,7 @@ class ValidationResult(BaseModel):
 
 @dataclass(frozen=True)
 class QualityConfig:
-    relevance_threshold: float = 0.08
+    relevance_threshold: float = 0.02
     duplicate_threshold: float = 0.8
     relevance_weight: float = 0.35
     correctness_weight: float = 0.25
@@ -47,6 +47,11 @@ def max_similarity(question: GeneratedQuestion, existing: list[GeneratedQuestion
     return max((lexical_similarity(question.question_text, item.question_text) for item in existing), default=0.0)
 
 
+def context_relevance(question: GeneratedQuestion, context: list[str]) -> float:
+    """Compare against each retrieved chunk, not one oversized concatenation."""
+    return max((lexical_similarity(question.question_text, chunk) for chunk in context), default=0.0)
+
+
 class QuestionQualityService:
     def __init__(self, config: QualityConfig | None = None) -> None:
         self.config = config or QualityConfig()
@@ -60,8 +65,7 @@ class QuestionQualityService:
         existing_questions: list[GeneratedQuestion] | None = None,
     ) -> ValidationResult:
         issues: list[ValidationIssue] = []
-        context_text = " ".join(context)
-        relevance = lexical_similarity(question.question_text, context_text)
+        relevance = context_relevance(question, context)
         if relevance < self.config.relevance_threshold:
             issues.append(ValidationIssue(code="irrelevant", message="Question has insufficient overlap with retrieved context."))
         if question.difficulty not in template.supported_difficulties:
