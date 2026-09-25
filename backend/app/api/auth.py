@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from app.core.config import get_settings
 from app.core.database import get_database
 from app.models import UserDocument
-from app.schemas import CurrentUserResponse, LoginRequest, TokenResponse
+from app.schemas import CurrentUserResponse, LoginRequest, TokenResponse, ProfileUpdateRequest, PasswordUpdateRequest
 from app.services.auth import AuthService, AuthenticationError, AuthorizationError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -50,4 +50,20 @@ def login(payload: LoginRequest, service: AuthService = Depends(get_auth_service
 
 @router.get("/me", response_model=CurrentUserResponse)
 def me(user: UserDocument = Depends(get_current_user)) -> CurrentUserResponse:
-    return CurrentUserResponse(id=user.id, email=user.email, display_name=user.display_name, roles=user.roles)
+    return CurrentUserResponse(id=user.id, email=user.email, display_name=user.display_name, roles=user.roles, bio=user.bio, institution=user.institution)
+
+
+@router.patch("/me", response_model=CurrentUserResponse)
+def update_me(payload: ProfileUpdateRequest, user: UserDocument = Depends(get_current_user)) -> CurrentUserResponse:
+    database = get_database()
+    database.users.update_one({"_id": user.id}, {"$set": payload.model_dump()})
+    updated = UserDocument.model_validate(database.users.find_one({"_id": user.id}))
+    return CurrentUserResponse(id=updated.id, email=updated.email, display_name=updated.display_name, roles=updated.roles, bio=updated.bio, institution=updated.institution)
+
+
+@router.post("/me/password", status_code=status.HTTP_204_NO_CONTENT)
+def update_password(payload: PasswordUpdateRequest, user: UserDocument = Depends(get_current_user), service: AuthService = Depends(get_auth_service)) -> None:
+    if not service.verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Your current password is incorrect.")
+    database = get_database()
+    database.users.update_one({"_id": user.id}, {"$set": {"password_hash": service.hash_password(payload.new_password)}})

@@ -3,6 +3,8 @@ import pytest
 
 from app.database import ensure_indexes
 from app.models import ModelPaperDocument, QuestionBankDocument, QuestionDocument
+from app.api.model_papers import GeneratedPaperCreate, download_model_paper, preview_model_paper, save_generated_paper
+from app.services.generation import GeneratedQuestion
 from app.services.model_papers import ModelPaperError, ModelPaperService
 
 
@@ -90,3 +92,29 @@ def test_model_paper_rejects_unsatisfied_blueprint(database) -> None:
             question_count=2,
             question_type_counts={"MCQ": 2},
         )
+
+
+def test_generated_paper_can_be_previewed_and_downloaded_as_pdf(database) -> None:
+    generated = GeneratedQuestion(
+        question_text="Which side contains smaller binary-search-tree values?",
+        options=[{"key": "A", "text": "Left"}, {"key": "B", "text": "Right"}],
+        correct_answer="A",
+        explanation="Smaller values are stored on the left.",
+        difficulty="Medium",
+        bloom_level="Apply",
+        sources=[{"chunk_id": "chunk-1", "page": 1}],
+    )
+    user = type("User", (), {"id": "faculty-1"})()
+    paper = save_generated_paper(
+        GeneratedPaperCreate(name="Unit 1 Test", subject_id="subject-1", questions=[generated]),
+        database,
+        user,
+    )
+
+    preview = preview_model_paper(paper.id, database, user)
+    download = download_model_paper(paper.id, database, user)
+
+    assert preview.paper.name == "Unit 1 Test"
+    assert preview.questions[0].question_text == generated.question_text
+    assert download.media_type == "application/pdf"
+    assert download.body.startswith(b"%PDF-1.4")

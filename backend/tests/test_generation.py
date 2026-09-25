@@ -1,10 +1,17 @@
 import mongomock
 import pytest
+from hashlib import sha256
 from fastapi import HTTPException
 
-from app.api.questions import GenerateRequest, generate_questions
+from app.api.questions import GenerateRequest, PaperGenerateRequest, generate_paper, generate_questions
 from app.models import DocumentChunkDocument, QuestionTemplateDocument
-from app.services.generation import DeterministicLLMProvider, GenerationError, GenerationService, NvidiaProvider
+from app.services.generation import (
+    DeterministicLLMProvider,
+    GenerationError,
+    GenerationService,
+    NvidiaProvider,
+    parse_chat_completion,
+)
 
 
 def template() -> QuestionTemplateDocument:
@@ -140,3 +147,71 @@ def test_nvidia_provider_parses_non_streaming_json(monkeypatch: pytest.MonkeyPat
     result = NvidiaProvider("test-key").generate_structured("prompt")
 
     assert result["question_text"] == "What is a tree?"
+
+
+def test_nvidia_provider_does_not_duplicate_bearer_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "{}"}}]}
+
+    def fake_post(*args: object, **kwargs: object) -> Response:
+        assert kwargs["headers"]["Authorization"] == "Bearer configured-key"
+        return Response()
+
+    monkeypatch.setattr("app.services.generation.httpx.post", fake_post)
+    assert NvidiaProvider("Bearer configured-key").generate_structured("prompt") == {}
+
+
+def test_provider_parser_accepts_fenced_json() -> None:
+    assert parse_chat_completion({"choices": [{"message": {"content": "```json\n{\"answer\": 42}\n```"}}]}) == {"answer": 42}
+
+
+def test_paper_generation_falls_back_when_configured_provider_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FailingProvider:
+        provider_name = "failing-provider"
+
+        def generate_structured(self, prompt: str) -> dict:
+            raise ValueError("simulated hosted-model failure")
+
+    database = mongomock.MongoClient().test
+    configured_template = template()
+    configured_template.sections = [{"question_type": "MCQ", "pattern": "Direct Concept", "count": 5, "marks": 1}]
+    database.question_templates.insert_one(configured_template.model_dump(by_alias=True))
+    for index in range(40):
+        document = DocumentChunkDocument(
+            study_material_id="material-1",
+            chunk_index=index,
+            page_number=index + 1,
+            content=" ".join(sha256(f"topic-{index}-{term}".encode()).hexdigest()[:8] for term in range(8)),
+            embedding=[1.0],
+        )
+        database.document_chunks.insert_one(document.model_dump(by_alias=True))
+
+    monkeypatch.setattr("app.api.questions._configured_provider", lambda settings: FailingProvider())
+    trace: list[str] = []
+    result = generate_paper(
+        PaperGenerateRequest(template_id=configured_template.id, difficulty="Medium", bloom_level="Apply"),
+        database,
+        object(),
+        trace=lambda message, **_: trace.append(message),
+    )
+
+    assert len(result) == 5
+    assert all(question.sources for question in result)
+    assert any("local grounded fallback" in message for message in trace)
+
+
+def test_generation_accepts_legacy_lowercase_difficulty_and_bloom_values() -> None:
+    legacy_template = template()
+    legacy_template.supported_difficulties = ["medium"]
+    legacy_template.supported_bloom_levels = ["apply"]
+
+    results = GenerationService().generate(
+        template=legacy_template, chunks=[chunk()], difficulty="Medium", bloom_level="Apply"
+    )
+
+    assert results[0].difficulty == "Medium"
+    assert results[0].bloom_level == "Apply"

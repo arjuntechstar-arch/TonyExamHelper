@@ -8,7 +8,7 @@ without changing the API contract.
 from dataclasses import dataclass
 
 from app.models import QuestionTemplateDocument
-from app.services.generation import GeneratedQuestion, GenerationError, GenerationService, LLMProvider
+from app.services.generation import MAX_CONTEXT_CHUNKS, GeneratedQuestion, GenerationError, GenerationService, LLMProvider, ProviderRateLimitError
 from app.services.quality import QuestionQualityService, ValidationIssue
 
 
@@ -31,15 +31,32 @@ class QuestionPreparingAgent:
         difficulty: str,
         bloom_level: str,
         candidate_index: int,
+        guidance: str | None = None,
     ) -> GeneratedQuestion:
+        selected_chunks = select_context_window(chunks, candidate_index)
         return self.generator.generate(
             template=template,
-            chunks=chunks,
+            chunks=selected_chunks,
             difficulty=difficulty,
             bloom_level=bloom_level,
             candidate_count=1,
             candidate_index=candidate_index,
+            guidance=guidance,
         )[0]
+
+
+def select_context_window(chunks: list[dict], candidate_index: int, max_chunks: int = MAX_CONTEXT_CHUNKS) -> list[dict]:
+    """Bound each model call while rotating source coverage across a paper.
+
+    A paper may have hundreds of indexed chunks. Sending all of them in every
+    prompt exceeds hosted-model context limits and was the direct cause of paper
+    generation failures. A rotated window keeps each question grounded while
+    distributing candidates across the uploaded material.
+    """
+    if len(chunks) <= max_chunks:
+        return chunks
+    start = (candidate_index * max_chunks) % len(chunks)
+    return [chunks[(start + offset) % len(chunks)] for offset in range(max_chunks)]
 
 
 class PatternValidationAgent:
@@ -109,6 +126,7 @@ class QuestionGenerationGraph:
         candidate_count: int = 1,
         existing_questions: list[GeneratedQuestion] | None = None,
         trace=None,
+        guidance: str | None = None,
     ) -> list[GeneratedQuestion]:
         if candidate_count < 1 or candidate_count > 20:
             raise GenerationError("candidate_count must be between 1 and 20.")
@@ -129,7 +147,12 @@ class QuestionGenerationGraph:
                         difficulty=difficulty,
                         bloom_level=bloom_level,
                         candidate_index=candidate_index + attempt,
+                        guidance=guidance,
                     )
+                except ProviderRateLimitError as error:
+                    if trace:
+                        trace("Hosted model rate limit reached; switching this paper section to the grounded fallback.", stage="model_rate_limited")
+                    raise error
                 except GenerationError as error:
                     rejected.append(str(error))
                     continue
@@ -158,7 +181,9 @@ class QuestionGenerationGraph:
             if question is None or not accepted or accepted[-1] is not question:
                 continue
         generated = accepted[len(existing_questions or []):]
-        if not generated:
+        if len(generated) != candidate_count:
             detail = "; ".join(rejected[-5:]) or "No candidate passed validation."
-            raise GenerationError(f"Question generation failed validation: {detail}")
+            raise GenerationError(
+                f"Question generation produced {len(generated)} of {candidate_count} required candidates: {detail}"
+            )
         return generated

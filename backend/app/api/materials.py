@@ -3,14 +3,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pymongo.database import Database
 
-from app.api.auth import require_roles
+from app.api.auth import get_current_user
 from app.core.config import get_settings
 from app.core.database import get_database
 from app.models import StudyMaterialDocument, UserDocument
 from app.services.document_processing import DocumentProcessingError, DocumentProcessingService
 
 router = APIRouter(prefix="/materials", tags=["materials"])
-MaterialUser = Depends(require_roles("admin", "faculty"))
+MaterialUser = Depends(get_current_user)
 
 
 def get_document_service(database: Database = Depends(get_database)) -> DocumentProcessingService:

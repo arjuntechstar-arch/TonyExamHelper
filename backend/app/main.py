@@ -44,6 +44,13 @@ app.add_middleware(
 rate_limit_windows: dict[str, deque[float]] = defaultdict(deque)
 
 
+def is_generation_status_poll(request: Request) -> bool:
+    """The authenticated, read-only job-status endpoint is intentionally polled."""
+    return request.method == "GET" and bool(
+        re.fullmatch(r"/api/questions/generate/runs/[A-Za-z0-9-]+", request.url.path)
+    )
+
+
 @app.middleware("http")
 async def security_and_rate_limit(request: Request, call_next):
     supplied_request_id = request.headers.get("X-Request-ID")
@@ -53,25 +60,26 @@ async def security_and_rate_limit(request: Request, call_next):
         else str(uuid4())
     )
     token = correlation_id.set(request_id)
-    now = time.monotonic()
-    client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
-    window = rate_limit_windows[client_ip]
-    window.append(now)
-    while window and now - window[0] > 60:
-        window.popleft()
-    if len(window) > 100:
-        response = error_response(
-            request,
-            status_code=429,
-            error="rate_limit",
-            message="Too many requests. Please slow down.",
-        )
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        return response
+    if not is_generation_status_poll(request):
+        now = time.monotonic()
+        client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
+        window = rate_limit_windows[client_ip]
+        window.append(now)
+        while window and now - window[0] > 60:
+            window.popleft()
+        if len(window) > 100:
+            response = error_response(
+                request,
+                status_code=429,
+                error="rate_limit",
+                message="Too many requests. Please slow down.",
+            )
+            response.headers["X-Request-ID"] = request_id
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; frame-ancestors 'none'"
+            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+            return response
     try:
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id

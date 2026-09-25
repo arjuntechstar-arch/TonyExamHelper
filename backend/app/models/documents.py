@@ -24,6 +24,16 @@ class UserDocument(AuditDocument):
     password_hash: str
     roles: list[str] = Field(default_factory=lambda: ["student"])
     is_active: bool = True
+    bio: str | None = None
+    institution: str | None = None
+
+
+class QuestionFeedbackDocument(AuditDocument):
+    question_id: str
+    user_id: str
+    rating: int = Field(ge=1, le=5)
+    improvement_area: str | None = None
+    comment: str | None = None
 
 
 class CourseDocument(AuditDocument):

@@ -4,13 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from pymongo.database import Database
 
-from app.api.auth import require_roles
+from app.api.auth import get_current_user
 from app.core.database import get_database
 from app.models import UserDocument
 from app.services.retrieval import RetrievalService
 
 router = APIRouter(prefix="/retrieval", tags=["retrieval"])
-RetrievalUser = Depends(require_roles("admin", "faculty"))
+RetrievalUser = Depends(get_current_user)
 
 
 class RetrievalRequest(BaseModel):

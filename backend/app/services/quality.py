@@ -68,9 +68,9 @@ class QuestionQualityService:
         relevance = context_relevance(question, context)
         if relevance < self.config.relevance_threshold:
             issues.append(ValidationIssue(code="irrelevant", message="Question has insufficient overlap with retrieved context."))
-        if question.difficulty not in template.supported_difficulties:
+        if question.difficulty.casefold() not in {item.casefold() for item in template.supported_difficulties}:
             issues.append(ValidationIssue(code="difficulty", message="Difficulty is not supported by the selected template."))
-        if question.bloom_level not in template.supported_bloom_levels:
+        if question.bloom_level.casefold() not in {item.casefold() for item in template.supported_bloom_levels}:
             issues.append(ValidationIssue(code="bloom_level", message="Bloom level is not supported by the selected template."))
         if not question.sources:
             issues.append(ValidationIssue(code="sources", message="Question must include at least one source."))

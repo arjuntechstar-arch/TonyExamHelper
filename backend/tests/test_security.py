@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import app, is_generation_status_poll
 
 
 client = TestClient(app)
@@ -26,3 +26,15 @@ def test_rate_limit_blocks_excessive_requests() -> None:
     throttled = client.get("/api/health")
     assert throttled.status_code == 429
     assert throttled.json()["error"] == "rate_limit"
+
+
+def test_generation_status_poll_is_exempt_from_general_rate_limit() -> None:
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/questions/generate/runs/run-123",
+        "headers": [],
+    }
+    assert is_generation_status_poll(Request(scope))

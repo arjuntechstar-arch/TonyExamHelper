@@ -1,10 +1,12 @@
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
-from app.api.auth import require_roles
+from app.api.auth import get_current_user
 from app.core.database import get_database
 from app.core.config import Settings, get_settings
 from app.models import QuestionDocument, QuestionTemplateDocument, UserDocument
@@ -15,7 +17,7 @@ from app.services.quality import QuestionQualityService, ValidationResult
 from app.services.retrieval import RetrievalService
 
 router = APIRouter(prefix="/questions", tags=["questions"])
-QuestionUser = Depends(require_roles("admin", "faculty"))
+QuestionUser = Depends(get_current_user)
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +67,50 @@ class CreateQuestionRequest(BaseModel):
     marks: int = Field(default=1, ge=1, le=100)
 
 
-def generate_questions(payload: GenerateRequest, database: Database) -> list[GeneratedQuestion]:
+class FeedbackRequest(BaseModel):
+    rating: int = Field(ge=1, le=5)
+    improvement_area: str | None = Field(default=None, min_length=2, max_length=80)
+    comment: str | None = Field(default=None, max_length=1_000)
+
+
+DAILY_QUESTION_LIMIT = 50
+
+
+def _reserve_daily_quota(database: Database, user_id: str, requested: int) -> dict:
+    """Atomically reserve generation capacity before a model call."""
+    day = datetime.now(UTC).date().isoformat()
+    try:
+        usage = database.generation_usage.find_one_and_update(
+            {"user_id": user_id, "day": day, "count": {"$lte": DAILY_QUESTION_LIMIT - requested}},
+            {"$inc": {"count": requested}, "$setOnInsert": {"user_id": user_id, "day": day}},
+            upsert=True,
+            return_document=True,
+        )
+    except DuplicateKeyError:
+        usage = None
+    if usage is None:
+        current = database.generation_usage.find_one({"user_id": user_id, "day": day}) or {"count": DAILY_QUESTION_LIMIT}
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"Daily generation limit reached. {max(0, DAILY_QUESTION_LIMIT - current['count'])} questions remain today.")
+    return usage
+
+
+def _personal_guidance(database: Database, user_id: str) -> str | None:
+    areas = list(database.question_feedback.aggregate([
+        {"$match": {"user_id": user_id, "rating": {"$lt": 3}, "improvement_area": {"$ne": None}}},
+        {"$group": {"_id": "$improvement_area", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}}, {"$limit": 2},
+    ]))
+    personal = ", ".join(str(area["_id"]) for area in areas)
+    global_areas = [rule["improvement_area"] for rule in database.generation_feedback_rules.find({"active": True}, {"improvement_area": 1})]
+    parts = []
+    if personal:
+        parts.append("Prioritize this learner's feedback: improve " + personal + ".")
+    if global_areas:
+        parts.append("Apply validated studio-wide improvements: " + ", ".join(global_areas) + ".")
+    return " ".join(parts) or None
+
+
+def generate_questions(payload: GenerateRequest, database: Database, user_id: str | None = None) -> list[GeneratedQuestion]:
     template_data = database.question_templates.find_one({"_id": payload.template_id, "status": "active"})
     if not template_data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found.")
@@ -99,7 +144,7 @@ def generate_questions(payload: GenerateRequest, database: Database) -> list[Gen
                 difficulty=payload.difficulty,
                 bloom_level=payload.bloom_level,
                 candidate_count=payload.candidate_count,
-                existing_questions=existing_questions,
+                existing_questions=existing_questions, guidance=_personal_guidance(database, user_id) if user_id else None,
             )
         except GenerationError:
             if provider is None:
@@ -111,7 +156,7 @@ def generate_questions(payload: GenerateRequest, database: Database) -> list[Gen
                 difficulty=payload.difficulty,
                 bloom_level=payload.bloom_level,
                 candidate_count=payload.candidate_count,
-                existing_questions=existing_questions,
+                existing_questions=existing_questions, guidance=_personal_guidance(database, user_id) if user_id else None,
             )
     except GenerationError as error:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
@@ -121,25 +166,27 @@ def generate_questions(payload: GenerateRequest, database: Database) -> list[Gen
 def generate(
     payload: GenerateRequest,
     database: Database = Depends(get_database),
-    _: UserDocument = QuestionUser,
+    user: UserDocument = QuestionUser,
 ) -> list[GeneratedQuestion]:
-    return generate_questions(payload, database)
+    _reserve_daily_quota(database, user.id, payload.candidate_count)
+    return generate_questions(payload, database, user.id)
 
 
 @router.post("/generate/batch", response_model=list[list[GeneratedQuestion]])
 def generate_batch(
     payload: BatchGenerateRequest,
     database: Database = Depends(get_database),
-    _: UserDocument = QuestionUser,
+    user: UserDocument = QuestionUser,
 ) -> list[list[GeneratedQuestion]]:
-    return [generate_questions(request, database) for request in payload.requests]
+    _reserve_daily_quota(database, user.id, sum(request.candidate_count for request in payload.requests))
+    return [generate_questions(request, database, user.id) for request in payload.requests]
 
 
 @router.post("/generate/paper", response_model=list[GeneratedQuestion])
 def generate_paper(
     payload: PaperGenerateRequest,
     database: Database = Depends(get_database),
-    _: UserDocument = QuestionUser,
+    user: UserDocument = QuestionUser,
     trace=None,
 ) -> list[GeneratedQuestion]:
     template_data = database.question_templates.find_one({"_id": payload.template_id, "status": "active"})
@@ -178,17 +225,35 @@ def generate_paper(
                 "pattern": str(section["pattern"]),
                 "marks": int(section["marks"]),
             })
-            generated.extend(
-                QuestionGenerationGraph(provider=provider).generate(
-                    template=section_template,
-                    chunks=chunks,
-                    difficulty=payload.difficulty,
-                    bloom_level=payload.bloom_level,
-                    candidate_count=int(section["count"]),
-                    existing_questions=existing_questions + generated,
-                    trace=trace,
+            try:
+                generated.extend(
+                    QuestionGenerationGraph(provider=provider).generate(
+                        template=section_template,
+                        chunks=chunks,
+                        difficulty=payload.difficulty,
+                        bloom_level=payload.bloom_level,
+                        candidate_count=int(section["count"]),
+                        existing_questions=existing_questions + generated,
+                        trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
+                    )
                 )
-            )
+            except GenerationError:
+                if provider is None:
+                    raise
+                logger.warning("Configured LLM provider failed during paper generation; using deterministic fallback.", exc_info=True)
+                if trace:
+                    trace("Configured model failed validation; retrying this section with the local grounded fallback.", stage="model_fallback")
+                generated.extend(
+                    QuestionGenerationGraph().generate(
+                        template=section_template,
+                        chunks=chunks,
+                        difficulty=payload.difficulty,
+                        bloom_level=payload.bloom_level,
+                        candidate_count=int(section["count"]),
+                        existing_questions=existing_questions + generated,
+                        trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
+                    )
+                )
         return generated
     except (GenerationError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -198,8 +263,13 @@ def generate_paper(
 def start_generate_paper(
     payload: PaperGenerateRequest,
     database: Database = Depends(get_database),
-    _: UserDocument = QuestionUser,
+    user: UserDocument = QuestionUser,
 ) -> dict:
+    template = database.question_templates.find_one({"_id": payload.template_id, "status": "active"})
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found.")
+    sections = template.get("sections") or [{"count": 1}]
+    _reserve_daily_quota(database, user.id, sum(int(section["count"]) for section in sections))
     def worker(run: GenerationRun) -> list[dict]:
         run.log("Retrieving indexed source context.", stage="retrieval")
         questions = generate_paper(payload, database, trace=run.log)
@@ -207,6 +277,15 @@ def start_generate_paper(
 
     run = generation_runs.create(worker)
     return run.snapshot()
+
+
+@router.get("/usage")
+def generation_usage(database: Database = Depends(get_database), user: UserDocument = QuestionUser) -> dict:
+    day = datetime.now(UTC).date().isoformat()
+    usage = database.generation_usage.find_one({"user_id": user.id, "day": day}) or {"count": 0}
+    totals = list(database.generation_usage.aggregate([{"$match": {"user_id": user.id}}, {"$group": {"_id": None, "count": {"$sum": "$count"}}}]))
+    created = totals[0]["count"] if totals else 0
+    return {"daily_limit": DAILY_QUESTION_LIMIT, "used_today": usage["count"], "remaining_today": max(0, DAILY_QUESTION_LIMIT - usage["count"]), "questions_created": created}
 
 
 @router.get("/generate/runs/{run_id}")
@@ -266,7 +345,7 @@ def _existing_questions(
 def create_question(
     payload: CreateQuestionRequest,
     database: Database = Depends(get_database),
-    _: UserDocument = QuestionUser,
+    user: UserDocument = QuestionUser,
 ) -> QuestionDocument:
     subject_id = payload.subject_id
     if subject_id is None and payload.question.sources:
@@ -292,9 +371,36 @@ def create_question(
         syllabus_id=payload.syllabus_id,
         topic_id=payload.topic_id,
         marks=payload.marks,
+        created_by_id=user.id,
     )
     database.questions.insert_one(question.model_dump(by_alias=True))
     return question
+
+
+@router.post("/{question_id}/feedback")
+def rate_question(
+    question_id: str,
+    payload: FeedbackRequest,
+    database: Database = Depends(get_database),
+    user: UserDocument = QuestionUser,
+) -> dict:
+    if payload.rating < 3 and not payload.improvement_area:
+        raise HTTPException(status_code=422, detail="Choose an improvement area for ratings below 3.")
+    document = {
+        "question_id": question_id, "user_id": user.id, "rating": payload.rating,
+        "improvement_area": payload.improvement_area, "comment": payload.comment,
+        "created_at": datetime.now(UTC), "updated_at": datetime.now(UTC),
+    }
+    database.question_feedback.update_one({"question_id": question_id, "user_id": user.id}, {"$set": document}, upsert=True)
+    global_matches = 0
+    if payload.improvement_area:
+        global_matches = database.question_feedback.count_documents({"rating": {"$lt": 3}, "improvement_area": payload.improvement_area})
+        if global_matches >= 10:
+            database.generation_feedback_rules.update_one(
+                {"improvement_area": payload.improvement_area},
+                {"$set": {"improvement_area": payload.improvement_area, "active": True, "evidence_count": global_matches, "updated_at": datetime.now(UTC)}}, upsert=True,
+            )
+    return {"saved": True, "personalized": payload.rating < 3, "global_rule_active": global_matches >= 10}
 
 
 @router.get("/review", response_model=list[QuestionDocument])

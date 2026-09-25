@@ -20,3 +20,6 @@ def ensure_indexes(database: Database) -> None:
     database.question_options.create_index([("question_id", ASCENDING), ("option_key", ASCENDING)], unique=True)
     database.practice_tests.create_index([("student_id", ASCENDING), ("status", ASCENDING)])
     database.student_answers.create_index([("practice_test_id", ASCENDING), ("question_id", ASCENDING)], unique=True)
+    database.question_feedback.create_index([("question_id", ASCENDING), ("user_id", ASCENDING)], unique=True)
+    database.question_feedback.create_index([("improvement_area", ASCENDING), ("rating", ASCENDING)])
+    database.generation_usage.create_index([("user_id", ASCENDING), ("day", ASCENDING)], unique=True)

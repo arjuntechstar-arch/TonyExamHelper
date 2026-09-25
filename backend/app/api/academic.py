@@ -2,13 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from pymongo.database import Database
 
-from app.api.auth import require_roles
+from app.api.auth import get_current_user
 from app.core.database import get_database
 from app.models import CourseDocument, SubjectDocument, SyllabusDocument, SyllabusTopicDocument
 
 router = APIRouter(tags=["academics"])
-AcademicUser = Depends(require_roles("admin", "faculty"))
-AcademicReadUser = Depends(require_roles("student", "admin", "faculty"))
+AcademicUser = Depends(get_current_user)
+AcademicReadUser = Depends(get_current_user)
 
 
 class SubjectCreate(BaseModel):

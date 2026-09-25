@@ -3,12 +3,12 @@ from pydantic import BaseModel, Field, model_validator
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 
-from app.api.auth import require_roles
+from app.api.auth import get_current_user
 from app.core.database import get_database
 from app.models import QuestionTemplateDocument, UserDocument
 
 router = APIRouter(prefix="/templates", tags=["templates"])
-TemplateUser = Depends(require_roles("admin", "faculty"))
+TemplateUser = Depends(get_current_user)
 
 
 class PatternSection(BaseModel):
@@ -55,9 +55,9 @@ def list_templates(
     difficulty: str | None = None,
     bloom_level: str | None = None,
     database: Database = Depends(get_database),
-    _: UserDocument = TemplateUser,
+    user: UserDocument = TemplateUser,
 ) -> list[QuestionTemplateDocument]:
-    query: dict = {"status": "active"}
+    query: dict = {"status": "active", "created_by_id": user.id}
     if question_type:
         query["question_type"] = question_type
     if pattern:
@@ -66,14 +66,36 @@ def list_templates(
         query["supported_difficulties"] = difficulty
     if bloom_level:
         query["supported_bloom_levels"] = bloom_level
-    return [QuestionTemplateDocument.model_validate(item) for item in database.question_templates.find(query).sort("name")]
+    templates = [QuestionTemplateDocument.model_validate(item) for item in database.question_templates.find(query).sort("name")]
+    if templates:
+        return templates
+    # A new workspace needs an immediately usable pattern; otherwise the
+    # generator's pattern dropdown is empty until a user discovers the admin API.
+    starter = QuestionTemplateDocument(
+        name="Standard MCQ assessment",
+        question_type="MCQ",
+        pattern="Concept and application",
+        required_fields=["question_text", "explanation"],
+        supported_difficulties=["Easy", "Medium", "Hard"],
+        supported_bloom_levels=["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"],
+        version="1.0",
+        marks=1,
+        sections=[{"question_type": "MCQ", "pattern": "Concept and application", "count": 1, "marks": 1}],
+        total_marks=1,
+        created_by_id=user.id,
+    )
+    try:
+        database.question_templates.insert_one(starter.model_dump(by_alias=True))
+    except DuplicateKeyError:
+        return [QuestionTemplateDocument.model_validate(item) for item in database.question_templates.find(query).sort("name")]
+    return [starter]
 
 
 @router.post("", response_model=QuestionTemplateDocument, status_code=status.HTTP_201_CREATED)
 def create_template(
     payload: TemplatePayload,
     database: Database = Depends(get_database),
-    _: UserDocument = TemplateUser,
+    user: UserDocument = TemplateUser,
 ) -> QuestionTemplateDocument:
     values = payload.model_dump()
     if not values["sections"]:
@@ -84,7 +106,7 @@ def create_template(
             "marks": values["marks"],
         }]
         values["total_marks"] = values["marks"]
-    template = QuestionTemplateDocument(**values)
+    template = QuestionTemplateDocument(**values, created_by_id=user.id)
     try:
         database.question_templates.insert_one(template.model_dump(by_alias=True))
     except DuplicateKeyError as error:
@@ -97,9 +119,9 @@ def update_template(
     template_id: str,
     payload: TemplateUpdate,
     database: Database = Depends(get_database),
-    _: UserDocument = TemplateUser,
+    user: UserDocument = TemplateUser,
 ) -> QuestionTemplateDocument:
-    current = database.question_templates.find_one({"_id": template_id, "status": "active"})
+    current = database.question_templates.find_one({"_id": template_id, "status": "active", "created_by_id": user.id})
     if not current:
         raise HTTPException(status_code=404, detail="Template not found.")
     changes = payload.model_dump(exclude_unset=True)

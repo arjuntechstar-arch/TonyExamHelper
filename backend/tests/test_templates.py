@@ -6,6 +6,10 @@ from app.api.templates import TemplatePayload, TemplateUpdate, create_template, 
 from app.database import ensure_indexes
 
 
+def user():
+    return type("User", (), {"id": "user-1"})()
+
+
 def payload(name: str = "Direct Concept", version: str = "1.0") -> TemplatePayload:
     return TemplatePayload(
         name=name,
@@ -26,20 +30,20 @@ def database():
 
 
 def test_template_crud_and_filter_selection(database) -> None:
-    created = create_template(payload(), database, object())
+    created = create_template(payload(), database, user())
 
-    selected = list_templates(question_type="MCQ", difficulty="Medium", bloom_level="Apply", database=database, _=object())
-    updated = update_template(created.id, TemplateUpdate(pattern="Scenario Based"), database, object())
+    selected = list_templates(question_type="MCQ", difficulty="Medium", bloom_level="Apply", database=database, user=user())
+    updated = update_template(created.id, TemplateUpdate(pattern="Scenario Based"), database, user())
 
     assert [item.id for item in selected] == [created.id]
     assert updated.pattern == "Scenario Based"
 
 
 def test_template_name_and_version_must_be_unique(database) -> None:
-    create_template(payload(), database, object())
+    create_template(payload(), database, user())
 
     with pytest.raises(HTTPException) as error:
-        create_template(payload(), database, object())
+        create_template(payload(), database, user())
 
     assert error.value.status_code == 409
 
