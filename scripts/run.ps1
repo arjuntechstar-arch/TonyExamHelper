@@ -141,7 +141,7 @@ try {
         Write-Host "Starting FastAPI backend on http://localhost:$BackendPort ..."
         $BackendProcess = Start-Process `
             -FilePath $PythonPath `
-            -ArgumentList '-m', 'uvicorn', 'app.main:app', '--app-dir', 'backend', '--host', '127.0.0.1', '--port', $BackendPort `
+            -ArgumentList '-m', 'uvicorn', 'app.main:app', '--app-dir', 'backend', '--host', '127.0.0.1', '--port', $BackendPort, '--reload' `
             -WorkingDirectory $Root `
             -PassThru `
             -NoNewWindow

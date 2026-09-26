@@ -215,3 +215,26 @@ def test_generation_accepts_legacy_lowercase_difficulty_and_bloom_values() -> No
 
     assert results[0].difficulty == "Medium"
     assert results[0].bloom_level == "Apply"
+
+
+def test_question_generation_with_web_knowledge(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.api.questions._configured_provider", lambda settings: None)
+    database = mongomock.MongoClient().test
+    configured_template = template()
+    database.question_templates.insert_one(configured_template.model_dump(by_alias=True))
+
+    questions = generate_questions(
+        GenerateRequest(
+            template_id=configured_template.id,
+            query="Distributed Consensus Paxos and Raft",
+            difficulty="Medium",
+            bloom_level="Apply",
+            allow_web_knowledge=True,
+        ),
+        database,
+    )
+
+    assert len(questions) == 1
+    assert questions[0].sources[0].chunk_id == "web-knowledge-chunk-1"
+    assert len(questions[0].options) >= 2
+

@@ -126,6 +126,7 @@ class RetrievalService:
         *,
         top_k: int = 5,
         subject_id: str | None = None,
+        study_material_id: str | None = None,
         course_id: str | None = None,
         syllabus_id: str | None = None,
         topic_id: str | None = None,
@@ -134,6 +135,7 @@ class RetrievalService:
             key: value
             for key, value in {
                 "subject_id": subject_id,
+                "study_material_id": study_material_id,
                 "course_id": course_id,
                 "syllabus_id": syllabus_id,
                 "topic_id": topic_id,
@@ -147,6 +149,7 @@ class RetrievalService:
         self,
         *,
         subject_id: str | None = None,
+        study_material_id: str | None = None,
         course_id: str | None = None,
         syllabus_id: str | None = None,
         topic_id: str | None = None,
@@ -155,6 +158,7 @@ class RetrievalService:
             key: value
             for key, value in {
                 "subject_id": subject_id,
+                "study_material_id": study_material_id,
                 "course_id": course_id,
                 "syllabus_id": syllabus_id,
                 "topic_id": topic_id,

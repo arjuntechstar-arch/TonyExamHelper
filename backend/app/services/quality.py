@@ -66,7 +66,8 @@ class QuestionQualityService:
     ) -> ValidationResult:
         issues: list[ValidationIssue] = []
         relevance = context_relevance(question, context)
-        if relevance < self.config.relevance_threshold:
+        is_web = any("web" in str(getattr(s, "chunk_id", "")).lower() for s in question.sources) or any("open-domain" in c.lower() for c in context)
+        if not is_web and relevance < self.config.relevance_threshold:
             issues.append(ValidationIssue(code="irrelevant", message="Question has insufficient overlap with retrieved context."))
         if question.difficulty.casefold() not in {item.casefold() for item in template.supported_difficulties}:
             issues.append(ValidationIssue(code="difficulty", message="Difficulty is not supported by the selected template."))

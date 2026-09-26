@@ -16,6 +16,8 @@ class PatternSection(BaseModel):
     pattern: str = Field(min_length=1, max_length=100)
     count: int = Field(ge=1, le=100)
     marks: int = Field(ge=1, le=100)
+    supported_difficulties: list[str] | None = Field(default=None, min_length=1)
+    supported_bloom_levels: list[str] | None = Field(default=None, min_length=1)
 
 
 class TemplatePayload(BaseModel):
@@ -48,6 +50,8 @@ class TemplateUpdate(BaseModel):
     supported_bloom_levels: list[str] | None = Field(default=None, min_length=1)
     version: str | None = Field(default=None, min_length=1, max_length=30)
     marks: int | None = Field(default=None, ge=1, le=100)
+    sections: list[PatternSection] | None = None
+    total_marks: int | None = Field(default=None, ge=1, le=1_000)
 @router.get("", response_model=list[QuestionTemplateDocument])
 def list_templates(
     question_type: str | None = None,
@@ -125,6 +129,13 @@ def update_template(
     if not current:
         raise HTTPException(status_code=404, detail="Template not found.")
     changes = payload.model_dump(exclude_unset=True)
+    if "sections" in changes or "total_marks" in changes:
+        sections = changes.get("sections", current.get("sections", []))
+        total_marks = changes.get("total_marks", current.get("total_marks", current.get("marks", 1)))
+        if sections:
+            expected = sum(section["count"] * section["marks"] for section in sections)
+            if expected != total_marks:
+                raise HTTPException(status_code=422, detail="total_marks must equal the sum of section count × marks.")
     if changes:
         try:
             database.question_templates.update_one({"_id": template_id}, {"$set": changes})
@@ -132,3 +143,16 @@ def update_template(
             raise HTTPException(status_code=409, detail="A template with this name and version already exists.") from error
     updated = database.question_templates.find_one({"_id": template_id})
     return QuestionTemplateDocument.model_validate(updated)
+
+
+@router.delete("/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_template(
+    template_id: str,
+    database: Database = Depends(get_database),
+    user: UserDocument = TemplateUser,
+) -> None:
+    result = database.question_templates.delete_one(
+        {"_id": template_id, "status": "active", "created_by_id": user.id},
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Template not found.")

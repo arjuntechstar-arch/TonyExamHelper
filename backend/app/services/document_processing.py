@@ -63,7 +63,7 @@ class DocumentProcessingService:
     def upload(
         self,
         *,
-        subject_id: str,
+        subject_id: str | None,
         filename: str,
         content_type: str,
         content: bytes,
@@ -72,12 +72,14 @@ class DocumentProcessingService:
         topic_id: str | None = None,
     ) -> StudyMaterialDocument:
         extension = self._validate_upload(filename, content_type, content)
-        subject = self.database.subjects.find_one({"_id": subject_id})
-        if subject is None:
-            subject = self.database.subjects.find_one({"code": subject_id.upper()})
-        if subject is None:
-            raise DocumentProcessingError("Subject not found.")
-        resolved_subject_id = str(subject["_id"])
+        resolved_subject_id: str | None = None
+        if subject_id:
+            subject = self.database.subjects.find_one({"_id": subject_id})
+            if subject is None:
+                subject = self.database.subjects.find_one({"code": subject_id.upper()})
+            if subject is None:
+                raise DocumentProcessingError("Subject not found.")
+            resolved_subject_id = str(subject["_id"])
 
         storage_key = f"{uuid4()}.{extension}"
         self.storage_path.mkdir(parents=True, exist_ok=True)
@@ -122,7 +124,8 @@ class DocumentProcessingService:
                 content=chunk["content"],
                 metadata={
                     "source_file": material.filename,
-                    "subject_id": material.subject_id,
+                    "study_material_id": material.id,
+                    **({"subject_id": material.subject_id} if material.subject_id else {}),
                     **({"course_id": material.course_id} if material.course_id else {}),
                     **({"syllabus_id": material.syllabus_id} if material.syllabus_id else {}),
                     **({"topic_id": material.topic_id} if material.topic_id else {}),

@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { provideHttpClient } from '@angular/common/http';
@@ -78,7 +79,7 @@ describe('App', () => {
     );
   });
 
-  it('should bind the selected material subject and submit it with the file', async () => {
+  it('should upload material without a subject and generate from the selected pattern', async () => {
     const fixture = TestBed.createComponent(App);
     const http = TestBed.inject(HttpTestingController);
     const component = fixture.componentInstance as unknown as {
@@ -104,7 +105,7 @@ describe('App', () => {
     const templatesRequest = http.expectOne('/api/templates');
     templatesRequest.flush([
       {
-        id: 'pattern-1',
+        _id: 'pattern-1',
         name: 'GIS paper',
         question_type: 'MCQ',
         pattern: 'Direct Concept',
@@ -115,14 +116,9 @@ describe('App', () => {
         sections: [{ question_type: 'MCQ', pattern: 'Direct Concept', count: 1, marks: 1 }],
       },
     ]);
-    const subjectsRequest = http.expectOne('/api/subjects');
-    subjectsRequest.flush([{ id: 'gis2026', code: 'GIS2026', name: 'GIS AND ITS APPLICATIONS' }]);
     await fixture.whenStable();
     fixture.detectChanges();
 
-    const select = fixture.nativeElement.querySelector('select') as HTMLSelectElement;
-    select.value = 'gis2026';
-    select.dispatchEvent(new Event('change'));
     const fileInput = fixture.nativeElement.querySelector('.file-field input') as HTMLInputElement;
     Object.defineProperty(fileInput, 'files', {
       configurable: true,
@@ -138,9 +134,9 @@ describe('App', () => {
     expect(generateButton.disabled).toBe(false);
     generateButton.click();
     const uploadRequest = http.expectOne('/api/materials/upload');
-    expect(uploadRequest.request.body.get('subject_id')).toBe('gis2026');
+    expect(uploadRequest.request.body.get('subject_id')).toBeNull();
     uploadRequest.flush({
-      id: 'material-1',
+      _id: 'material-1',
       filename: 'Module 2.pdf',
       status: 'uploaded',
       size_bytes: 13,
@@ -152,16 +148,14 @@ describe('App', () => {
     const indexRequest = http.expectOne('/api/retrieval/materials/material-1/index');
     indexRequest.flush({ indexed_chunks: 1, embedding_model: 'hashing-v1' });
     await fixture.whenStable();
-    const generateRequest = http.expectOne('/api/questions/generate/paper');
+    const generateRequest = http.expectOne('/api/questions/generate/paper/start');
     expect(generateRequest.request.body).toEqual({
       template_id: 'pattern-1',
-      difficulty: 'Easy',
-      bloom_level: 'Understand',
-      subject_id: 'gis2026',
+      material_id: 'material-1',
       top_k: 5,
     });
-    generateRequest.flush([
-      {
+    generateRequest.flush({
+      id: 'run-1', status: 'completed', result: [{
         id: 'question-1',
         question_text: 'What is a geographic information system?',
         question_type: 'MCQ',
@@ -175,15 +169,146 @@ describe('App', () => {
         ],
         explanation: 'A GIS captures, stores, analyzes, and presents geographic data.',
         sources: [{ page_number: 1, text: 'A geographic information system...' }],
-      },
-    ]);
+      }],
+    });
     await fixture.whenStable();
     fixture.detectChanges();
 
     expect(
-      (fixture.componentInstance as unknown as { activeView: () => string }).activeView(),
+      (fixture.componentInstance as unknown as { view: () => string }).view(),
     ).toBe('Generated questions');
     expect(fixture.nativeElement.textContent).toContain('What is a geographic information system?');
+  });
+
+  it('should create and select a real subject instead of submitting a placeholder ID', async () => {
+    const fixture = TestBed.createComponent(App);
+    const http = TestBed.inject(HttpTestingController);
+    const app = fixture.componentInstance;
+    app.currentUser.set({
+      id: 'faculty-1',
+      email: 'faculty@example.com',
+      display_name: 'Faculty',
+      roles: ['faculty'],
+    });
+    http
+      .expectOne('/api/health')
+      .flush({ status: 'ok', service: 'api', timestamp: '2026-01-01T00:00:00Z' });
+    await fixture.whenStable();
+
+    expect(app.subjects()).toEqual([]);
+    expect(app.selectedSubjectId()).toBe('');
+    app.newSubjectCode.set('CS301');
+    app.newSubjectName.set('Algorithms');
+
+    const creation = app.createSubject();
+    const request = http.expectOne('/api/subjects');
+    expect(request.request.body).toEqual({ code: 'CS301', name: 'Algorithms' });
+    request.flush({ _id: 'subject-301', code: 'CS301', name: 'Algorithms' });
+    await creation;
+
+    expect(app.subjects()).toEqual([
+      { _id: 'subject-301', id: 'subject-301', code: 'CS301', name: 'Algorithms' },
+    ]);
+    expect(app.selectedSubjectId()).toBe('subject-301');
+  });
+
+  it('should stop paper generation until a file is selected', async () => {
+    const fixture = TestBed.createComponent(App);
+    const http = TestBed.inject(HttpTestingController);
+    const app = fixture.componentInstance;
+    http
+      .expectOne('/api/health')
+      .flush({ status: 'ok', service: 'api', timestamp: '2026-01-01T00:00:00Z' });
+    await fixture.whenStable();
+
+    await app.uploadAndGeneratePaper();
+
+    http.expectNone('/api/materials/upload');
+    expect(app.notice()).toContain('Upload the study material');
+  });
+
+  it('should save a mixed question-pattern blueprint with the matching total marks', async () => {
+    const fixture = TestBed.createComponent(App);
+    const http = TestBed.inject(HttpTestingController);
+    const app = fixture.componentInstance;
+    app.currentUser.set({
+      id: 'faculty-1',
+      email: 'faculty@example.com',
+      display_name: 'Faculty',
+      roles: ['faculty'],
+    });
+    http
+      .expectOne('/api/health')
+      .flush({ status: 'ok', service: 'api', timestamp: '2026-01-01T00:00:00Z' });
+    await fixture.whenStable();
+
+    app.newPatternName.set('Mixed midterm paper');
+    app.updatePatternSectionNumber(0, 'count', 8);
+    app.addPatternSection();
+    app.newPatternTotalMarks.set(10);
+
+    const save = app.savePattern();
+    const request = http.expectOne('/api/templates');
+    expect(request.request.body).toEqual({
+      name: 'Mixed midterm paper',
+      question_type: 'MCQ',
+      pattern: 'Direct Concept & Application',
+      required_fields: ['question_text', 'explanation'],
+      supported_difficulties: ['Medium'],
+      supported_bloom_levels: ['Understand'],
+      version: '1.0',
+      marks: 1,
+      total_marks: 10,
+      sections: [
+        {
+          question_type: 'MCQ',
+          pattern: 'Direct Concept & Application',
+          count: 8,
+          marks: 1,
+          supported_difficulties: ['Medium'],
+          supported_bloom_levels: ['Understand'],
+        },
+        {
+          question_type: 'Short Answer',
+          pattern: 'Direct Concept & Application',
+          count: 1,
+          marks: 2,
+          supported_difficulties: ['Medium'],
+          supported_bloom_levels: ['Understand'],
+        },
+      ],
+    });
+    request.flush({ id: 'mixed-midterm' });
+    await save;
+
+    expect(app.templates()[0]).toMatchObject({
+      id: 'mixed-midterm',
+      total_marks: 10,
+      sections: [
+        { question_type: 'MCQ', count: 8, marks: 1 },
+        { question_type: 'Short Answer', count: 1, marks: 2 },
+      ],
+    });
+    expect(app.isMixedPattern(app.templates()[0])).toBe(true);
+  });
+
+  it('should not save a pattern when its section allocation differs from total marks', async () => {
+    const fixture = TestBed.createComponent(App);
+    const http = TestBed.inject(HttpTestingController);
+    const app = fixture.componentInstance;
+    http
+      .expectOne('/api/health')
+      .flush({ status: 'ok', service: 'api', timestamp: '2026-01-01T00:00:00Z' });
+    await fixture.whenStable();
+
+    const originalTemplates = app.templates().length;
+    app.newPatternName.set('Mismatched paper');
+    app.newPatternTotalMarks.set(11);
+    await app.savePattern();
+
+    http.expectNone('/api/templates');
+    expect(app.templates()).toHaveLength(originalTemplates);
+    expect(app.notice()).toContain('Section marks add up to 10');
   });
 
   it('should show the sign-in dialog and report invalid credentials', async () => {

@@ -25,8 +25,8 @@ def processing_error(error: DocumentProcessingError) -> HTTPException:
 
 @router.post("/upload", response_model=StudyMaterialDocument, status_code=status.HTTP_201_CREATED)
 async def upload_material(
-    subject_id: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
+    subject_id: Annotated[str | None, Form()] = None,
     course_id: Annotated[str | None, Form()] = None,
     syllabus_id: Annotated[str | None, Form()] = None,
     topic_id: Annotated[str | None, Form()] = None,

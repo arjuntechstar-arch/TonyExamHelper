@@ -56,7 +56,7 @@ class SyllabusTopicDocument(AuditDocument):
 
 
 class StudyMaterialDocument(AuditDocument):
-    subject_id: str
+    subject_id: str | None = None
     course_id: str | None = None
     syllabus_id: str | None = None
     topic_id: str | None = None
@@ -86,7 +86,7 @@ class QuestionTemplateDocument(AuditDocument):
     supported_bloom_levels: list[str] = Field(min_length=1)
     version: str = Field(min_length=1, max_length=30)
     marks: int = Field(default=1, ge=1, le=100)
-    sections: list[dict[str, str | int]] = Field(default_factory=list)
+    sections: list[dict[str, object]] = Field(default_factory=list)
     total_marks: int = Field(default=1, ge=1, le=1_000)
 
 

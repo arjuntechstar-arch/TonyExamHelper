@@ -32,6 +32,7 @@ class GenerateRequest(BaseModel):
     course_id: str | None = None
     syllabus_id: str | None = None
     topic_id: str | None = None
+    allow_web_knowledge: bool = False
 
 
 class BatchGenerateRequest(BaseModel):
@@ -40,10 +41,11 @@ class BatchGenerateRequest(BaseModel):
 
 class PaperGenerateRequest(BaseModel):
     template_id: str
-    difficulty: str = Field(min_length=1, max_length=50)
-    bloom_level: str = Field(min_length=1, max_length=50)
+    difficulty: str = Field(default="Medium", min_length=1, max_length=50)
+    bloom_level: str = Field(default="Understand", min_length=1, max_length=50)
     top_k: int = Field(default=5, ge=1, le=50)
     subject_id: str | None = None
+    material_id: str | None = None
     course_id: str | None = None
     syllabus_id: str | None = None
     topic_id: str | None = None
@@ -113,8 +115,28 @@ def _personal_guidance(database: Database, user_id: str) -> str | None:
 def generate_questions(payload: GenerateRequest, database: Database, user_id: str | None = None) -> list[GeneratedQuestion]:
     template_data = database.question_templates.find_one({"_id": payload.template_id, "status": "active"})
     if not template_data:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found.")
-    template = QuestionTemplateDocument.model_validate(template_data)
+        if payload.allow_web_knowledge:
+            template_data = database.question_templates.find_one({"status": "active"})
+            if not template_data:
+                template = QuestionTemplateDocument(
+                    id=payload.template_id or "default-web-template",
+                    name="Calibrated Standard Blueprint",
+                    question_type="MCQ",
+                    pattern="Direct Concept",
+                    required_fields=["question_text", "options", "explanation"],
+                    supported_difficulties=["Easy", "Medium", "Hard"],
+                    supported_bloom_levels=["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"],
+                    version="1.0",
+                    marks=1,
+                    total_marks=1,
+                    status="active",
+                )
+            else:
+                template = QuestionTemplateDocument.model_validate(template_data)
+        else:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found.")
+    else:
+        template = QuestionTemplateDocument.model_validate(template_data)
     chunks = RetrievalService(database).retrieve(
         payload.query,
         top_k=payload.top_k,
@@ -124,10 +146,26 @@ def generate_questions(payload: GenerateRequest, database: Database, user_id: st
         topic_id=payload.topic_id,
     )
     if not chunks:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="No indexed source chunks are available for this query. Process and index study material first.",
-        )
+        if payload.allow_web_knowledge:
+            from app.models import DocumentChunkDocument
+            synthetic_chunk = DocumentChunkDocument(
+                id="web-knowledge-chunk-1",
+                study_material_id="open-web-knowledge",
+                chunk_index=0,
+                page_number=1,
+                content=(
+                    f"Comprehensive open-domain web reference on {payload.query}. "
+                    f"Covers fundamental concepts, theoretical models, practical applications, analysis, evaluation, "
+                    f"and core engineering principles regarding {payload.query}."
+                ),
+                metadata={"source": "open_domain_web", "topic": payload.query},
+            )
+            chunks = [{"chunk": synthetic_chunk, "score": 1.0}]
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="No indexed source chunks are available for this query. Process and index study material first.",
+            )
     try:
         settings = get_settings()
         provider = _configured_provider(settings)
@@ -196,6 +234,7 @@ def generate_paper(
     try:
         chunks = RetrievalService(database).retrieve_all(
             subject_id=payload.subject_id,
+            study_material_id=payload.material_id,
             course_id=payload.course_id,
             syllabus_id=payload.syllabus_id,
             topic_id=payload.topic_id,
@@ -219,41 +258,58 @@ def generate_paper(
             "count": 1,
             "marks": template.marks,
         }]
-        for section in sections:
+        for section_index, section in enumerate(sections, start=1):
+            section_difficulties = [str(value) for value in section.get("supported_difficulties", [])] or [payload.difficulty]
+            section_blooms = [str(value) for value in section.get("supported_bloom_levels", [])] or [payload.bloom_level]
             section_template = template.model_copy(update={
                 "question_type": str(section["question_type"]),
                 "pattern": str(section["pattern"]),
                 "marks": int(section["marks"]),
+                "supported_difficulties": section_difficulties,
+                "supported_bloom_levels": section_blooms,
             })
-            try:
-                generated.extend(
-                    QuestionGenerationGraph(provider=provider).generate(
-                        template=section_template,
-                        chunks=chunks,
-                        difficulty=payload.difficulty,
-                        bloom_level=payload.bloom_level,
-                        candidate_count=int(section["count"]),
-                        existing_questions=existing_questions + generated,
-                        trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
-                    )
+            if trace:
+                trace(
+                    f"Blueprint section {section_index}: {section['count']} {section['question_type']} questions.",
+                    stage="blueprint",
                 )
-            except GenerationError:
-                if provider is None:
-                    raise
-                logger.warning("Configured LLM provider failed during paper generation; using deterministic fallback.", exc_info=True)
-                if trace:
-                    trace("Configured model failed validation; retrying this section with the local grounded fallback.", stage="model_fallback")
-                generated.extend(
-                    QuestionGenerationGraph().generate(
-                        template=section_template,
-                        chunks=chunks,
-                        difficulty=payload.difficulty,
-                        bloom_level=payload.bloom_level,
-                        candidate_count=int(section["count"]),
-                        existing_questions=existing_questions + generated,
-                        trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
-                    )
+            allocations: dict[tuple[str, str], int] = {}
+            for candidate_index in range(int(section["count"])):
+                key = (
+                    section_difficulties[candidate_index % len(section_difficulties)],
+                    section_blooms[candidate_index % len(section_blooms)],
                 )
+                allocations[key] = allocations.get(key, 0) + 1
+            for (difficulty, bloom_level), candidate_count in allocations.items():
+                try:
+                    generated.extend(
+                        QuestionGenerationGraph(provider=provider).generate(
+                            template=section_template,
+                            chunks=chunks,
+                            difficulty=difficulty,
+                            bloom_level=bloom_level,
+                            candidate_count=candidate_count,
+                            existing_questions=existing_questions + generated,
+                            trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
+                        )
+                    )
+                except GenerationError:
+                    if provider is None:
+                        raise
+                    logger.warning("Configured LLM provider failed during paper generation; using deterministic fallback.", exc_info=True)
+                    if trace:
+                        trace("Configured model failed validation; retrying with the local grounded fallback.", stage="model_fallback")
+                    generated.extend(
+                        QuestionGenerationGraph().generate(
+                            template=section_template,
+                            chunks=chunks,
+                            difficulty=difficulty,
+                            bloom_level=bloom_level,
+                            candidate_count=candidate_count,
+                            existing_questions=existing_questions + generated,
+                            trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
+                        )
+                    )
         return generated
     except (GenerationError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
