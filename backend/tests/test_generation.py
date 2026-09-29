@@ -1,15 +1,16 @@
 import mongomock
 import pytest
-from hashlib import sha256
 from fastapi import HTTPException
 
 from app.api.questions import GenerateRequest, PaperGenerateRequest, generate_paper, generate_questions
 from app.models import DocumentChunkDocument, QuestionTemplateDocument
 from app.services.generation import (
     DeterministicLLMProvider,
+    FailoverProvider,
     GenerationError,
     GenerationService,
     NvidiaProvider,
+    ProviderRateLimitError,
     parse_chat_completion,
 )
 
@@ -37,6 +38,34 @@ def chunk() -> dict:
         ),
         "score": 0.9,
     }
+
+
+def test_failover_provider_uses_next_route_only_after_rate_limit() -> None:
+    class RateLimitedProvider:
+        provider_name = "openrouter"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_structured(self, prompt: str) -> dict:
+            self.calls += 1
+            raise ProviderRateLimitError("HTTP 429")
+
+    class WorkingProvider:
+        provider_name = "nvidia-nim"
+
+        def generate_structured(self, prompt: str) -> dict:
+            return {"route": "nvidia"}
+
+    limited = RateLimitedProvider()
+    provider = FailoverProvider([limited, WorkingProvider()])
+
+    assert provider.generate_structured("question") == {"route": "nvidia"}
+    # The first HTTP 429 starts a shared cooldown; the next provider call must
+    # skip the exhausted OpenRouter route instead of retrying it again.
+    assert provider.generate_structured("question") == {"route": "nvidia"}
+    assert limited.calls == 1
+    assert provider.active_provider_name == "nvidia-nim"
 
 
 class RetryingProvider:
@@ -101,7 +130,7 @@ def test_deterministic_provider_preserves_pipe_characters_in_source() -> None:
     )
 
     assert results[0].sources[0].page == 4
-    assert "GIS uses layers" in results[0].question_text
+    assert "GIS uses layers" in results[0].options[0].text
 
 
 def test_question_generation_requires_indexed_source_chunks() -> None:
@@ -185,7 +214,7 @@ def test_paper_generation_falls_back_when_configured_provider_fails(monkeypatch:
             study_material_id="material-1",
             chunk_index=index,
             page_number=index + 1,
-            content=" ".join(sha256(f"topic-{index}-{term}".encode()).hexdigest()[:8] for term in range(8)),
+            content=f"Topic{index} explains a distinct evaluation principle.",
             embedding=[1.0],
         )
         database.document_chunks.insert_one(document.model_dump(by_alias=True))
@@ -217,24 +246,23 @@ def test_generation_accepts_legacy_lowercase_difficulty_and_bloom_values() -> No
     assert results[0].bloom_level == "Apply"
 
 
-def test_question_generation_with_web_knowledge(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_question_generation_reports_unavailable_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.api.questions._configured_provider", lambda settings: None)
     database = mongomock.MongoClient().test
     configured_template = template()
     database.question_templates.insert_one(configured_template.model_dump(by_alias=True))
 
-    questions = generate_questions(
-        GenerateRequest(
-            template_id=configured_template.id,
-            query="Distributed Consensus Paxos and Raft",
-            difficulty="Medium",
-            bloom_level="Apply",
-            allow_web_knowledge=True,
-        ),
-        database,
-    )
+    with pytest.raises(HTTPException) as error:
+        generate_questions(
+            GenerateRequest(
+                template_id=configured_template.id,
+                query="Distributed Consensus Paxos and Raft",
+                difficulty="Medium",
+                bloom_level="Apply",
+                allow_web_knowledge=True,
+            ),
+            database,
+        )
 
-    assert len(questions) == 1
-    assert questions[0].sources[0].chunk_id == "web-knowledge-chunk-1"
-    assert len(questions[0].options) >= 2
-
+    assert error.value.status_code == 503
+    assert "No AI generation model is available" in str(error.value.detail)

@@ -29,6 +29,7 @@ class QualityConfig:
     correctness_weight: float = 0.25
     compliance_weight: float = 0.25
     completeness_weight: float = 0.15
+    source_copy_threshold: float = 0.72
 
 
 def tokens(value: str) -> set[str]:
@@ -49,7 +50,25 @@ def max_similarity(question: GeneratedQuestion, existing: list[GeneratedQuestion
 
 def context_relevance(question: GeneratedQuestion, context: list[str]) -> float:
     """Compare against each retrieved chunk, not one oversized concatenation."""
-    return max((lexical_similarity(question.question_text, chunk) for chunk in context), default=0.0)
+    assessment_text = " ".join([question.question_text, *(option.text for option in question.options)])
+    return max((lexical_similarity(assessment_text, chunk) for chunk in context), default=0.0)
+
+
+def contains_source_noise(value: str) -> bool:
+    return bool(re.search(
+        r"[\w.+-]+@[\w.-]+\.[a-z]{2,}|this file is meant for personal use|all rights reserved|"
+        r"copyright|do not distribute",
+        value,
+        flags=re.IGNORECASE,
+    )) or bool(re.search(r"\b(?=[A-Z0-9]{8,}\b)(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*\d)[A-Z0-9]+\b", value))
+
+
+def copies_source_text(question: GeneratedQuestion, context: list[str], threshold: float) -> bool:
+    values = [question.question_text, *(option.text for option in question.options)]
+    return any(
+        len(tokens(value)) >= 8 and lexical_similarity(value, source) >= threshold
+        for value in values for source in context
+    )
 
 
 class QuestionQualityService:
@@ -75,13 +94,20 @@ class QuestionQualityService:
             issues.append(ValidationIssue(code="bloom_level", message="Bloom level is not supported by the selected template."))
         if not question.sources:
             issues.append(ValidationIssue(code="sources", message="Question must include at least one source."))
+        if contains_source_noise(" ".join([question.question_text, question.explanation, *(option.text for option in question.options)])):
+            issues.append(ValidationIssue(code="source_noise", message="Question contains source watermark, email, ID, or license text."))
+        if copies_source_text(question, context, self.config.source_copy_threshold):
+            issues.append(ValidationIssue(code="source_copy", message="Question or option copies source text instead of assessing a concept."))
+        if question.explanation.casefold().strip() in {"the answer is grounded in the retrieved source content.", "the answer is grounded in the source content."}:
+            issues.append(ValidationIssue(code="generic_explanation", message="Explanation must explain the answer using the source concept."))
+        self._validate_question_construction(question, template, issues)
         if template.question_type.casefold() == "mcq":
             self._validate_mcq(question, issues)
         duplicate_similarity = max_similarity(question, existing_questions or [])
         if duplicate_similarity >= self.config.duplicate_threshold:
             issues.append(ValidationIssue(code="duplicate", message="Question is too similar to an existing question."))
 
-        correctness = 0.0 if any(issue.code in {"sources", "mcq_options", "correct_answer"} for issue in issues) else 1.0
+        correctness = 0.0 if any(issue.code in {"sources", "mcq_options", "correct_answer", "source_copy", "source_noise"} for issue in issues) else 1.0
         compliance = 0.0 if any(issue.code in {"difficulty", "bloom_level"} for issue in issues) else 1.0
         completeness = 1.0 if question.question_text and question.explanation else 0.0
         ranking_score = (
@@ -101,7 +127,21 @@ class QuestionQualityService:
     @staticmethod
     def _validate_mcq(question: GeneratedQuestion, issues: list[ValidationIssue]) -> None:
         keys = [option.key for option in question.options]
-        if len(keys) < 2 or len(keys) != len(set(keys)):
-            issues.append(ValidationIssue(code="mcq_options", message="MCQ must contain at least two unique options."))
+        option_texts = [option.text.casefold().strip() for option in question.options]
+        if len(keys) != 4 or len(keys) != len(set(keys)) or len(option_texts) != len(set(option_texts)):
+            issues.append(ValidationIssue(code="mcq_options", message="MCQ must contain exactly four unique options."))
         if question.correct_answer not in keys:
             issues.append(ValidationIssue(code="correct_answer", message="Correct answer must reference an option key."))
+        if any(re.search(r"\b(not supported|all of the above|none of the above|opposite relationship|unrelated to the stated concept|evidence is absent)\b", option, re.IGNORECASE) for option in option_texts):
+            issues.append(ValidationIssue(code="generic_distractor", message="MCQ distractors must be plausible concept alternatives."))
+
+    @staticmethod
+    def _validate_question_construction(question: GeneratedQuestion, template: QuestionTemplateDocument, issues: list[ValidationIssue]) -> None:
+        text = question.question_text.strip()
+        if re.search(r"^(according to the material|which conclusion is best supported|a student makes an error involving\.|which evidence-based inference)", text, re.IGNORECASE):
+            issues.append(ValidationIssue(code="template_shell", message="Question uses a generic retrieval-template shell instead of a concept-specific task."))
+        if re.search(r"\b([a-z]{2,})\s+\1\b", text, re.IGNORECASE) or re.search(r"\b(involving\.|about\s*[?!.])", text, re.IGNORECASE):
+            issues.append(ValidationIssue(code="malformed_question", message="Question contains an incomplete or extraction-corrupted phrase."))
+        if template.marks >= 2 and question.bloom_level.casefold() in {"apply", "analyze", "evaluate", "create"}:
+            if not re.search(r"\b(if|given|scenario|case|compare|why|how|calculate|determine)\b", text, re.IGNORECASE):
+                issues.append(ValidationIssue(code="mark_complexity", message="Higher-mark cognitive targets require an application, comparison, scenario, or multi-step task."))

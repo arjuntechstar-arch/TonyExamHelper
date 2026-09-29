@@ -1,4 +1,5 @@
 import { HttpClient, HttpHeaders } from '@angular/common/http';
+import { DatePipe } from '@angular/common';
 import { Component, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
@@ -9,6 +10,7 @@ export type View =
   | 'Patterns'
   | 'Question paper'
   | 'Generated questions'
+  | 'Monitoring'
   | 'Practice'
   | 'Library'
   | 'Profile';
@@ -27,6 +29,17 @@ export interface Usage {
   used_today: number;
   remaining_today: number;
   questions_created: number;
+}
+
+export interface QuestionSetMetrics {
+  total_questions: number;
+  unique_questions: number;
+  duplicate_count: number;
+  duplicate_rate: number;
+  coverage: number;
+  difficulty_distribution: Record<string, number>;
+  bloom_distribution: Record<string, number>;
+  pattern_distribution: Record<string, number>;
 }
 
 export interface Subject {
@@ -70,8 +83,18 @@ interface GenerationRun {
   status: 'queued' | 'running' | 'completed' | 'failed';
   stage?: string;
   message?: string;
+  request_type?: string;
+  started_at?: string;
+  logs?: GenerationTraceEvent[];
   result?: Question[];
   error?: string;
+}
+
+interface GenerationTraceEvent {
+  timestamp: string;
+  stage: string;
+  level: 'info' | 'error';
+  message: string;
 }
 
 interface GenerationTimelineStep {
@@ -185,7 +208,7 @@ export const DEFAULT_TEMPLATES: Template[] = [
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [FormsModule],
+  imports: [FormsModule, DatePipe],
   templateUrl: './app.html',
   styleUrl: './app.scss',
 })
@@ -199,6 +222,8 @@ export class App {
   // System & Health
   public readonly apiConnected = signal<boolean>(false);
   public readonly apiMessage = signal<string>('Connecting...');
+  public readonly modelAvailable = signal<boolean>(false);
+  public readonly modelMessage = signal<string>('Model checking...');
 
   // User & Auth State
   public readonly currentUser = signal<User | null>(null);
@@ -216,6 +241,7 @@ export class App {
     remaining_today: 50,
     questions_created: 0,
   });
+  public readonly questionMetrics = signal<QuestionSetMetrics | null>(null);
 
   // Global Notification / Notice
   public readonly notice = signal<string>('');
@@ -231,6 +257,11 @@ export class App {
   public readonly materialProcessing = signal<boolean>(false);
   public readonly materialStatus = signal<string>('');
   public readonly generationTimeline = signal<GenerationTimelineStep[]>([]);
+  public readonly generationRuns = signal<GenerationRun[]>([]);
+  public readonly selectedGenerationRun = signal<GenerationRun | null>(null);
+  public readonly generationRunsLoading = signal<boolean>(false);
+  public readonly libraryPapers = signal<GenerationRun[]>([]);
+  public readonly libraryLoading = signal<boolean>(false);
 
   // Templates & Pattern Management
   public readonly templates = signal<Template[]>(DEFAULT_TEMPLATES);
@@ -240,7 +271,7 @@ export class App {
   public readonly query = signal<string>('');
   public readonly difficulty = signal<string>('Medium');
   public readonly bloom = signal<string>('Understand');
-  public readonly count = signal<number>(3);
+  public readonly count = signal<number>(1);
   public readonly allowWebKnowledge = signal<boolean>(true);
   public readonly generating = signal<boolean>(false);
   public readonly generatingStep = signal<string>('');
@@ -249,12 +280,12 @@ export class App {
 
   // Pattern Studio State (Create Pattern Page)
   public readonly newPatternName = signal<string>('');
-  public readonly newPatternTotalMarks = signal<number>(10);
+  public readonly newPatternTotalMarks = signal<number>(1);
   public readonly newPatternSections = signal<TemplateSection[]>([
     {
       question_type: 'MCQ',
       pattern: 'Direct Concept & Application',
-      count: 10,
+      count: 1,
       marks: 1,
       supported_difficulties: ['Medium'],
       supported_bloom_levels: ['Understand'],
@@ -306,18 +337,25 @@ export class App {
   public async checkApiHealth(): Promise<void> {
     try {
       const res = await firstValueFrom(
-        this.http.get<{ status: string; service: string }>('/api/health')
+        this.http.get<{ status: string; service: string; model_status: string; model_provider?: string; model_name?: string }>('/api/health')
       );
       if (res?.status === 'ok') {
         this.apiConnected.set(true);
         this.apiMessage.set('API connected');
+        const modelReady = res.model_status === 'configured';
+        this.modelAvailable.set(modelReady);
+        this.modelMessage.set(modelReady ? `Model ready: ${res.model_provider} · ${res.model_name}` : 'Model unavailable');
       } else {
         this.apiConnected.set(false);
         this.apiMessage.set('API degraded');
+        this.modelAvailable.set(false);
+        this.modelMessage.set('Model status unavailable');
       }
     } catch {
       this.apiConnected.set(false);
       this.apiMessage.set('API offline');
+      this.modelAvailable.set(false);
+      this.modelMessage.set('Model status unavailable');
     }
   }
 
@@ -500,11 +538,60 @@ export class App {
       void this.checkApiHealth();
     } else if (v === 'Question paper') {
       void this.loadTemplates();
+    } else if (v === 'Monitoring') {
+      void this.loadGenerationRuns();
+    } else if (v === 'Library') {
+      void this.loadLibraryPapers();
     } else if (v === 'Create' || v === 'Patterns') {
       if (this.currentUser()) {
         void this.loadTemplates();
       }
     }
+  }
+
+  public async loadGenerationRuns(): Promise<void> {
+    if (!this.currentUser()) return;
+    this.generationRunsLoading.set(true);
+    try {
+      const runs = await firstValueFrom(this.http.get<GenerationRun[]>('/api/questions/generate/runs?limit=100', { headers: this.authHeaders() }));
+      this.generationRuns.set(runs);
+      if (!this.selectedGenerationRun() && runs.length) this.selectedGenerationRun.set(runs[0]);
+    } catch {
+      this.setToast('Could not load generation traces.', 'error');
+    } finally {
+      this.generationRunsLoading.set(false);
+    }
+  }
+
+  public selectGenerationRun(run: GenerationRun): void {
+    this.selectedGenerationRun.set(run);
+  }
+
+  public async loadLibraryPapers(): Promise<void> {
+    if (!this.currentUser()) return;
+    this.libraryLoading.set(true);
+    try {
+      const runs = await firstValueFrom(this.http.get<GenerationRun[]>('/api/questions/generate/runs?limit=100', { headers: this.authHeaders() }));
+      this.libraryPapers.set(runs.filter((run) =>
+        run.request_type === 'paper' && run.status === 'completed' && Boolean(run.result?.length),
+      ));
+    } catch {
+      this.setToast('Could not load previously created question papers.', 'error');
+    } finally {
+      this.libraryLoading.set(false);
+    }
+  }
+
+  public openLibraryPaper(run: GenerationRun): void {
+    if (!run.result?.length) {
+      this.setToast('The saved paper has no generated questions to display.', 'warning');
+      return;
+    }
+    this.questions.set(run.result);
+    this.revealedAnswers.set({});
+    void this.evaluateGeneratedQuestions(run.result);
+    this.navigate('Generated questions');
+    this.setToast(`Opened saved paper with ${run.result.length} question(s).`, 'success');
   }
 
   public openLogin(): void {
@@ -603,7 +690,7 @@ export class App {
             query: this.query(),
             difficulty: this.difficulty(),
             bloom_level: this.bloom(),
-            candidate_count: this.count(),
+            candidate_count: 1,
             top_k: 5,
             allow_web_knowledge: true,
           },
@@ -611,6 +698,7 @@ export class App {
         )
       );
       this.questions.set(qs);
+      await this.evaluateGeneratedQuestions(qs);
       this.revealedAnswers.set({});
       this.setToast(`Success! Generated ${qs.length} internet-grounded question(s).`, 'success');
       void this.loadUsage();
@@ -839,9 +927,9 @@ export class App {
   public startNewPattern(): void {
     this.editingPatternId.set(null);
     this.newPatternName.set('');
-    this.newPatternTotalMarks.set(10);
+    this.newPatternTotalMarks.set(1);
     this.newPatternSections.set([{
-      question_type: 'MCQ', pattern: 'Direct Concept & Application', count: 10, marks: 1,
+      question_type: 'MCQ', pattern: 'Direct Concept & Application', count: 1, marks: 1,
       supported_difficulties: ['Medium'], supported_bloom_levels: ['Understand'],
     }]);
   }
@@ -937,6 +1025,7 @@ export class App {
       this.setGenerationStep('retrieve', 'complete');
       this.setGenerationStep('generate', 'complete', 'Question Generation Graph and quality agents completed the blueprint.');
       this.questions.set(paperQuestions);
+      await this.evaluateGeneratedQuestions(paperQuestions);
       this.revealedAnswers.set({});
       this.navigate('Generated questions');
       this.setToast(`Generated full exam paper with ${paperQuestions.length} calibrated questions!`, 'success');
@@ -951,6 +1040,23 @@ export class App {
     } finally {
       this.materialProcessing.set(false);
       this.materialStatus.set('');
+    }
+  }
+
+  private async evaluateGeneratedQuestions(questions: Question[]): Promise<void> {
+    if (!questions.length) {
+      this.questionMetrics.set(null);
+      return;
+    }
+    try {
+      const metrics = await firstValueFrom(this.http.post<QuestionSetMetrics>(
+        '/api/evaluation/questions', questions, { headers: this.authHeaders() },
+      ));
+      this.questionMetrics.set(metrics);
+    } catch {
+      // Evaluation is an enhancement: completed questions remain available if
+      // a user lacks the faculty/admin role required by this endpoint.
+      this.questionMetrics.set(null);
     }
   }
 

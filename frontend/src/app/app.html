@@ -9,7 +9,7 @@
           </svg>
         </div>
         <div class="brand-info">
-          <span class="brand-name">TonyExamHelper</span>
+          <span class="brand-name">Tony Quest</span>
           <span class="brand-tag">ASSESSMENT PLATFORM</span>
         </div>
       </button>
@@ -29,7 +29,11 @@
         </button>
         <button [class.active]="view() === 'Question paper' || view() === 'Generated questions'" (click)="navigate('Question paper')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/></svg>
-          Question paper
+          Generate questions
+        </button>
+        <button [class.active]="view() === 'Monitoring'" (click)="navigate('Monitoring')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 6-7"/></svg>
+          Monitoring
         </button>
         <button [class.active]="view() === 'Practice'" (click)="navigate('Practice')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
@@ -47,6 +51,10 @@
       <div class="api-pill" [class.connected]="apiConnected()">
         <span class="status-dot"></span>
         <span>{{ apiMessage() }}</span>
+      </div>
+      <div class="api-pill" [class.connected]="modelAvailable()" title="Configured generation model status">
+        <span class="status-dot"></span>
+        <span>{{ modelMessage() }}</span>
       </div>
 
       <!-- Quota Counter -->
@@ -113,11 +121,11 @@
             <div class="hero-actions">
               <button class="btn-primary" (click)="navigate('Create')">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4Z"/></svg>
-                Launch Question Workshop
+                Launch Competitive Workshop
               </button>
               <button class="btn-secondary" (click)="navigate('Question paper')">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/></svg>
-                Generate Question Paper
+                Generate Normal Exam
               </button>
               <button class="btn-secondary" (click)="navigate('Practice')">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="10 8 16 12 10 16 10 8"/></svg>
@@ -191,8 +199,8 @@
             </div>
             <div class="metric-data">
               <span class="metric-label">QUALITY & GROUNDING</span>
-              <strong class="metric-value">Active</strong>
-              <span class="metric-sub">Multi-agent verification pipeline</span>
+              <strong class="metric-value">{{ questionMetrics() ? (questionMetrics()!.coverage * 100) + '%' : 'Active' }}</strong>
+              <span class="metric-sub">{{ questionMetrics() ? questionMetrics()!.unique_questions + '/' + questionMetrics()!.total_questions + ' unique · ' + (questionMetrics()!.duplicate_rate * 100) + '% duplicates' : 'Multi-agent verification pipeline' }}</span>
             </div>
           </div>
 
@@ -250,47 +258,94 @@
       </div>
     }
 
+    <!-- VIEW: GENERATION MONITORING -->
+    @if (view() === 'Monitoring') {
+      <div class="view-container exam-mode-page animate-fade">
+        <div class="page-header exam-page-header">
+          <div>
+            <div class="header-badges-row"><span class="eyebrow-chip">REQUEST OBSERVABILITY</span></div>
+            <h2>Generation Monitoring</h2>
+            <p>Inspect every generation request, its stage-by-stage trace, and the exact validation or provider failure reason.</p>
+          </div>
+          <div class="header-actions"><button class="btn-glass" (click)="loadGenerationRuns()">Refresh traces</button></div>
+        </div>
+        <div class="generator-split">
+          <div class="control-panel glass-card">
+            <div class="card-header-bar"><span class="card-title">Requests</span><span class="badge-accent">{{ generationRuns().length }}</span></div>
+            @if (generationRunsLoading()) { <p>Loading traces…</p> }
+            @for (run of generationRuns(); track run.id) {
+              <button class="subject-list-item" [class.selected]="selectedGenerationRun()?.id === run.id" (click)="selectGenerationRun(run)">
+                <strong>{{ run.request_type || 'generation' }} · {{ run.status }}</strong>
+                <span>{{ run.started_at | date:'medium' }}</span>
+                <small>{{ run.message }}</small>
+              </button>
+            } @empty { <p>No generation requests recorded for this account yet.</p> }
+          </div>
+          <div class="glass-card control-panel">
+            @if (selectedGenerationRun(); as run) {
+              <div class="card-header-bar"><span class="card-title">{{ run.id }}</span><span class="badge-accent">{{ run.status }}</span></div>
+              @if (run.error) { <div class="source-mode-banner"><strong>Failure reason</strong><span>{{ run.error }}</span></div> }
+              <div class="generation-steps">
+                @for (event of run.logs || []; track event.timestamp + event.message) {
+                  <div class="generation-step" [class.error]="event.level === 'error'">
+                    <div class="step-copy"><strong>{{ event.stage }}</strong><span>{{ event.message }}</span><small>{{ event.timestamp | date:'mediumTime' }}</small></div>
+                  </div>
+                } @empty { <p>No trace events were captured.</p> }
+              </div>
+            } @else { <p>Select a request to inspect its end-to-end trace.</p> }
+          </div>
+        </div>
+      </div>
+    }
+
     <!-- VIEW: QUESTION WORKSHOP (CREATE) -->
     @if (view() === 'Create') {
-      <div class="view-container animate-fade">
-        <div class="page-header">
+      <div class="view-container exam-mode-page animate-fade">
+        <div class="page-header exam-page-header">
           <div>
+            <div class="page-breadcrumb"><span>Dashboard</span><span>/</span><span>Workshop</span><span>/</span><strong>Competitive Exam</strong></div>
             <div class="header-badges-row">
               <span class="eyebrow-chip">AI SYNTHESIS WORKSHOP</span>
               <span class="badge-web-knowledge">🌐 Internet & Open Domain Knowledge</span>
             </div>
-            <h2>Create Calibrated Questions</h2>
+            <h2>Question Workshop - Competitive Exam</h2>
             <p>Generate verifiable, multi-distractor questions synthesized from internet knowledge and open domain concepts — no uploaded textbook or syllabus required.</p>
           </div>
           <div class="header-actions">
             <button class="btn-glass" (click)="navigate('Patterns')">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>
-              <span>+ New Pattern</span>
+              <span>Manage patterns</span>
             </button>
           </div>
         </div>
 
-        <div class="generator-split">
+        <div class="exam-mode-tabs" role="tablist" aria-label="Question generation mode">
+          <button type="button" role="tab" (click)="navigate('Question paper')">Normal Exam</button>
+          <button type="button" role="tab" class="active" aria-selected="true">Competitive Exam</button>
+        </div>
+
+        <div class="exam-workspace competitive-workspace">
           <!-- Control Panel -->
-          <div class="control-panel glass-card">
-            <div class="card-header-bar">
-              <span class="card-title">Generation Parameters</span>
-              <span class="badge-accent">Grounded RAG</span>
+          <div class="control-panel glass-card exam-configuration-card">
+            <div class="card-step-badge">Step 1</div>
+            <div class="exam-card-title">
+              <h3>Exam Configuration</h3>
+              <p>Set the question pattern and the competitive-exam topic to assess.</p>
             </div>
 
             <!-- Source Mode Indicator -->
             <div class="source-mode-banner">
               <div class="source-mode-icon">🌐</div>
               <div class="source-mode-text">
-                <strong>Knowledge Source: Open Domain / Internet</strong>
-                <span>Directly synthesizes calibrated exam questions from global academic knowledge.</span>
+                <strong>Open-domain knowledge enabled</strong>
+                <span>Generate questions from a topic, concept, or syllabus without uploading a document.</span>
               </div>
             </div>
 
             <div class="form-group">
               <div class="label-with-action">
-                <label for="template-select">QUESTION PATTERN / BLUEPRINT</label>
-                <button type="button" class="btn-text-link" (click)="navigate('Patterns')">+ Create Pattern</button>
+                <label for="template-select">SELECT PATTERN <span class="required-mark">*</span></label>
+                <button type="button" class="btn-text-link" (click)="navigate('Patterns')">Create pattern</button>
               </div>
               <select
                 id="template-select"
@@ -307,20 +362,20 @@
             </div>
 
             <div class="form-group">
-              <label for="topic-query">TOPIC OR SOURCE CONCEPT</label>
+              <label for="topic-query">TOPIC / COURSE / CONCEPT / SYLLABUS <span class="required-mark">*</span></label>
               <textarea
                 id="topic-query"
                 class="form-input textarea-styled"
                 rows="3"
                 [ngModel]="query()"
                 (ngModelChange)="query.set($event)"
-                placeholder="e.g. Distributed Consensus Algorithms: Paxos vs Raft leader election"
+                placeholder="e.g. Indian polity: fundamental rights, Parliament, and constitutional bodies"
               ></textarea>
               <div class="prompt-chips">
-                <span (click)="query.set('Binary Search Trees: balancing and rotation operations')">🌲 Trees</span>
-                <span (click)="query.set('Database transaction ACID properties and isolation levels')">💾 ACID</span>
-                <span (click)="query.set('Convolutional Neural Networks: pooling and receptive field')">🧠 Deep Learning</span>
-                <span (click)="query.set('Operating Systems: paging and virtual memory translation')">⚡ OS Memory</span>
+                <span (click)="query.set('Indian polity: fundamental rights, Parliament, and constitutional bodies')">Indian polity</span>
+                <span (click)="query.set('Quantitative aptitude: ratios, percentages, and time-work problems')">Quantitative aptitude</span>
+                <span (click)="query.set('General science: mechanics, electricity, and the human body')">General science</span>
+                <span (click)="query.set('Computer science: data structures, algorithms, and databases')">Computer science</span>
               </div>
             </div>
 
@@ -348,18 +403,9 @@
             </div>
 
             <div class="form-group">
-              <label for="candidate-count">CANDIDATE QUESTION COUNT: <strong>{{ count() }}</strong></label>
+              <label>QUESTION DELIVERY</label>
               <div class="counter-control">
-                <input
-                  id="candidate-count"
-                  type="range"
-                  min="1"
-                  max="10"
-                  class="range-slider"
-                  [ngModel]="count()"
-                  (ngModelChange)="count.set(+$event)"
-                />
-                <span class="count-pill">{{ count() }}</span>
+                <span class="count-pill">1 verified question per request</span>
               </div>
             </div>
 
@@ -370,16 +416,50 @@
             >
               @if (generating()) {
                 <span class="spinner-small"></span>
-                <span>Generating from Internet...</span>
+                <span>Generating competitive question...</span>
               } @else {
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-                <span>Generate Questions from Internet →</span>
+                <span>Generate Competitive Question</span>
               }
             </button>
           </div>
 
-          <!-- Live Output Feed -->
-          <div class="output-panel">
+          <!-- Generation pipeline and live output -->
+          <div class="output-panel competitive-output">
+            <section class="glass-card generation-pipeline-card competitive-pipeline-card" aria-live="polite">
+              <div class="pipeline-heading">
+                <div>
+                  <div class="card-step-badge">Step 2</div>
+                  <h3>Generation Pipeline</h3>
+                  <p>{{ generating() ? (generatingStep() || 'AI is analyzing the requested competitive-exam scope.') : 'Ready to analyze your topic and create calibrated questions.' }}</p>
+                </div>
+                <span class="pipeline-live-status" [class.running]="generating()">{{ generating() ? 'Generating' : 'Ready' }}</span>
+              </div>
+              <div class="pipeline-stepper compact">
+                <div class="pipeline-step" [class.is-complete]="generating()" [class.is-active]="generating()">
+                  <span class="pipeline-node"><span>1</span></span>
+                  <strong>Analyze topic</strong><small>Understand concepts and scope</small>
+                </div>
+                <div class="pipeline-connector"></div>
+                <div class="pipeline-step" [class.is-active]="generating()">
+                  <span class="pipeline-node"><span>2</span></span>
+                  <strong>Plan questions</strong><small>Apply pattern and Bloom level</small>
+                </div>
+                <div class="pipeline-connector"></div>
+                <div class="pipeline-step" [class.is-active]="generating()">
+                  <span class="pipeline-node"><span>3</span></span>
+                  <strong>Validate</strong><small>Check quality and distractors</small>
+                </div>
+              </div>
+              <div class="pipeline-progress-row">
+                <div class="pipeline-progress"><span [class.running]="generating()"></span></div>
+                <strong>{{ generating() ? 'Working...' : 'Awaiting request' }}</strong>
+              </div>
+              <div class="pipeline-callout">
+                <span class="pipeline-callout-icon">AI</span>
+                <div><strong>Competitive-exam ready</strong><p>Questions are calibrated for the selected pattern, difficulty, and Bloom&apos;s level.</p></div>
+              </div>
+            </section>
             @if (generating()) {
               <div class="generation-loader glass-card animate-fade">
                 <div class="pulsing-core">
@@ -399,7 +479,7 @@
             @if (questions().length > 0) {
               <div class="results-header">
                 <div>
-                  <h3>Generated Candidate Questions</h3>
+                  <h3>Generated Question</h3>
                   <span class="result-count">{{ questions().length }} verified questions ready</span>
                 </div>
               </div>
@@ -758,24 +838,44 @@
 
     <!-- VIEW: QUESTION PAPER & BLUEPRINTS -->
     @if (view() === 'Question paper') {
-      <div class="view-container animate-fade">
-        <div class="page-header">
+      <div class="view-container exam-mode-page animate-fade">
+        <div class="page-header exam-page-header">
           <div>
+            <div class="page-breadcrumb"><span>Dashboard</span><span>/</span><span>Generate questions</span><span>/</span><strong>Normal Exam</strong></div>
             <span class="eyebrow-chip">ASSESSMENT BLUEPRINT</span>
-            <h2>Generate Complete Question Paper</h2>
-            <p>Bind syllabus materials, select the examination blueprint, and generate a cohesive question paper.</p>
+            <h2>Generate Questions - Normal Exam</h2>
+            <p>Upload your study material and select an exam pattern to generate a grounded question paper.</p>
           </div>
+        </div>
+
+        <div class="exam-mode-tabs" role="tablist" aria-label="Question generation mode">
+          <button type="button" role="tab" class="active" aria-selected="true">Normal Exam</button>
+          <button type="button" role="tab" (click)="navigate('Create')">Competitive Exam</button>
         </div>
 
         <div class="paper-workflow-grid">
           <!-- Step 1: Upload Material -->
           <div class="glass-card config-card">
             <div class="card-step-badge">Step 1</div>
-            <h3>Upload Study Material</h3>
-            <p class="card-desc">Attach syllabus notes or lecture slides in PDF to ground the examination.</p>
+            <h3>Exam Configuration</h3>
+            <p class="card-desc">Select the exam pattern and upload study material to ground the question paper.</p>
+
+            <div class="form-group">
+              <label for="paper-template-config">SELECT PATTERN <span class="required-mark">*</span></label>
+              <select
+                id="paper-template-config"
+                class="form-input select-styled"
+                [ngModel]="templateId()"
+                (ngModelChange)="setTemplateId($event)"
+              >
+                @for (tpl of templates(); track tpl.id) {
+                  <option [value]="tpl.id">{{ tpl.name }} ({{ tpl.total_marks || tpl.marks || 1 }} Marks)</option>
+                }
+              </select>
+            </div>
 
             <div class="form-group file-field">
-              <label>STUDY MATERIAL (PDF)</label>
+              <label>UPLOAD STUDY MATERIAL <span class="required-mark">*</span></label>
               <div class="file-dropzone">
                 <input
                   type="file"
@@ -799,10 +899,42 @@
           </div>
 
           <!-- Step 2: Pattern and generation -->
-          <div class="glass-card config-card">
+          <div class="glass-card config-card paper-pipeline-card">
             <div class="card-step-badge">Step 2</div>
-            <h3>Select Pattern & Generate</h3>
-            <p class="card-desc">Each pattern section supplies its own question type, difficulty, and Bloom's taxonomy targets.</p>
+            <h3>Generation Pipeline</h3>
+            <p class="card-desc">AI processes the document, generates questions, and validates every item before review.</p>
+
+            <div class="pipeline-stepper normal-pipeline" aria-live="polite">
+              <div class="pipeline-step" [class.is-complete]="generationTimeline()[0]?.state === 'complete'" [class.is-active]="generationTimeline()[0]?.state === 'active'">
+                <span class="pipeline-node"><span>1</span></span><strong>Parse document</strong><small>Extract text from your PDF</small>
+              </div>
+              <div class="pipeline-connector"></div>
+              <div class="pipeline-step" [class.is-complete]="generationTimeline()[1]?.state === 'complete'" [class.is-active]="generationTimeline()[1]?.state === 'active'">
+                <span class="pipeline-node"><span>2</span></span><strong>Clean content</strong><small>Remove noise and organize topics</small>
+              </div>
+              <div class="pipeline-connector"></div>
+              <div class="pipeline-step" [class.is-complete]="generationTimeline()[2]?.state === 'complete'" [class.is-active]="generationTimeline()[2]?.state === 'active'">
+                <span class="pipeline-node"><span>3</span></span><strong>Build context</strong><small>Create grounded retrieval chunks</small>
+              </div>
+              <div class="pipeline-connector"></div>
+              <div class="pipeline-step" [class.is-complete]="generationTimeline()[3]?.state === 'complete'" [class.is-active]="generationTimeline()[3]?.state === 'active'">
+                <span class="pipeline-node"><span>4</span></span><strong>Generate</strong><small>Apply your selected pattern</small>
+              </div>
+              <div class="pipeline-connector"></div>
+              <div class="pipeline-step" [class.is-complete]="generationTimeline()[4]?.state === 'complete'" [class.is-active]="generationTimeline()[4]?.state === 'active'">
+                <span class="pipeline-node"><span>5</span></span><strong>Validate</strong><small>Check quality and duplicates</small>
+              </div>
+            </div>
+
+            <div class="pipeline-progress-row">
+              <div class="pipeline-progress"><span [class.running]="materialProcessing()"></span></div>
+              <strong>{{ materialProcessing() ? 'Generating...' : 'Ready to generate' }}</strong>
+            </div>
+
+            <div class="pipeline-callout normal-callout">
+              <span class="pipeline-callout-icon">AI</span>
+              <div><strong>Grounded question generation</strong><p>Questions stay tied to your uploaded material and the selected blueprint.</p></div>
+            </div>
 
             <div class="form-group">
               <label for="paper-template">BLUEPRINT TEMPLATE</label>
@@ -1089,6 +1221,21 @@
           </div>
         </div>
 
+        @if (libraryLoading()) {
+          <div class="empty-state-panel glass-card"><p>Loading previously created question papers…</p></div>
+        } @else if (libraryPapers().length) {
+          <div class="library-paper-grid">
+            @for (paper of libraryPapers(); track paper.id) {
+              <article class="library-paper-card glass-card">
+                <span class="eyebrow-chip">GENERATED PAPER</span>
+                <h3>Question Paper</h3>
+                <p>{{ paper.result?.length || 0 }} questions · Created {{ paper.started_at | date:'medium' }}</p>
+                <small>Run ID: {{ paper.id }}</small>
+                <button class="btn-primary-gradient" (click)="openLibraryPaper(paper)">Open Paper →</button>
+              </article>
+            }
+          </div>
+        } @else {
         <div class="empty-state-panel glass-card">
           <div class="empty-illustration">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m16 6 4 14"/><path d="M12 6v14"/><path d="M8 8v12"/><path d="M4 4v16"/></svg>
@@ -1099,6 +1246,7 @@
             Synthesize New Set in Workshop →
           </button>
         </div>
+        }
       </div>
     }
 

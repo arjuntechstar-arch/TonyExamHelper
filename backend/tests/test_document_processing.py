@@ -1,7 +1,7 @@
 import mongomock
 import pytest
 
-from app.services.document_processing import DocumentProcessingError, DocumentProcessingService, chunk_pages
+from app.services.document_processing import DocumentProcessingError, DocumentProcessingService, chunk_pages, clean_document_pages
 
 
 @pytest.fixture
@@ -74,6 +74,18 @@ def test_upload_rejects_files_over_configured_limit(document_service: DocumentPr
 def test_chunk_pages_rejects_invalid_overlap() -> None:
     with pytest.raises(ValueError, match="overlap"):
         chunk_pages([(1, "content")], chunk_size=100, overlap=100)
+
+
+def test_clean_document_pages_removes_watermarks_ids_and_repeated_headers() -> None:
+    pages = clean_document_pages([
+        (1, "Course Notes\narjunrajagopal97@gmail.com\nAF9DLZM3U2\nPerplexity measures prediction quality.\nThis file is meant for personal use."),
+        (2, "Course Notes\nPerplexity of one means perfect prediction.\nCopyright Example"),
+    ])
+
+    assert pages == [
+        (1, "Perplexity measures prediction quality."),
+        (2, "Perplexity of one means perfect prediction."),
+    ]
 
 
 def test_status_reports_indexed_chunks_and_embedding_model(document_service: DocumentProcessingService) -> None:

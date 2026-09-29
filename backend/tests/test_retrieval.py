@@ -2,7 +2,7 @@ import mongomock
 import pytest
 
 from app.models import DocumentChunkDocument, StudyMaterialDocument
-from app.services.retrieval import HashEmbeddingProvider, RetrievalService, cosine_similarity
+from app.services.retrieval import HashEmbeddingProvider, RetrievalService, cosine_similarity, rerank_hybrid
 
 
 @pytest.fixture
@@ -52,6 +52,20 @@ def test_hash_embeddings_are_normalized_and_deterministic() -> None:
 
     assert first == second
     assert cosine_similarity(first, first) == pytest.approx(1.0)
+
+
+def test_hybrid_reranking_exposes_component_scores_and_diversifies_results() -> None:
+    candidates = [
+        {"chunk": DocumentChunkDocument(study_material_id="m", chunk_index=0, page_number=1, content="Binary tree traversal visits nodes."), "score": 0.9},
+        {"chunk": DocumentChunkDocument(study_material_id="m", chunk_index=1, page_number=2, content="Binary tree traversal visits nodes in order."), "score": 0.89},
+        {"chunk": DocumentChunkDocument(study_material_id="m", chunk_index=2, page_number=3, content="A database table stores related records."), "score": 0.6},
+    ]
+
+    results = rerank_hybrid("binary tree traversal", candidates, top_k=2)
+
+    assert len(results) == 2
+    assert all("semantic_score" in result and "lexical_score" in result for result in results)
+    assert results[0]["chunk"].content.startswith("Binary tree")
 
 
 def test_indexing_persists_embeddings_and_retrieval_ranks_matching_content(retrieval_service: RetrievalService) -> None:

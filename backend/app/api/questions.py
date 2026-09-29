@@ -10,7 +10,7 @@ from app.api.auth import get_current_user
 from app.core.database import get_database
 from app.core.config import Settings, get_settings
 from app.models import QuestionDocument, QuestionTemplateDocument, UserDocument
-from app.services.generation import GeneratedQuestion, GenerationError, NvidiaProvider, OpenAICompatibleProvider, OpenRouterProvider
+from app.services.generation import FailoverProvider, GeneratedQuestion, GenerationError, NvidiaProvider, OpenAICompatibleProvider, OpenRouterProvider, ProviderRateLimitError
 from app.services.question_agents import QuestionGenerationGraph
 from app.services.generation_runs import generation_runs, GenerationRun
 from app.services.quality import QuestionQualityService, ValidationResult
@@ -21,12 +21,20 @@ QuestionUser = Depends(get_current_user)
 logger = logging.getLogger(__name__)
 
 
+def _persist_run(database: Database, run: GenerationRun) -> None:
+    document = run.snapshot()
+    document["_id"] = run.id
+    database.generation_runs.replace_one({"_id": run.id}, document, upsert=True)
+
+
 class GenerateRequest(BaseModel):
     template_id: str
     query: str = Field(min_length=1, max_length=2_000)
     difficulty: str = Field(min_length=1, max_length=50)
     bloom_level: str = Field(min_length=1, max_length=50)
-    candidate_count: int = Field(default=1, ge=1, le=20)
+    # Current product flow: exactly one validated question per request.
+    # Multi-question selection will return as an explicit UI feature.
+    candidate_count: int = Field(default=1, ge=1, le=1)
     top_k: int = Field(default=5, ge=1, le=50)
     subject_id: str | None = None
     course_id: str | None = None
@@ -43,12 +51,15 @@ class PaperGenerateRequest(BaseModel):
     template_id: str
     difficulty: str = Field(default="Medium", min_length=1, max_length=50)
     bloom_level: str = Field(default="Understand", min_length=1, max_length=50)
+    query: str | None = Field(default=None, min_length=1, max_length=2_000)
+    question_count: int = Field(default=1, ge=1, le=20)
     top_k: int = Field(default=5, ge=1, le=50)
     subject_id: str | None = None
     material_id: str | None = None
     course_id: str | None = None
     syllabus_id: str | None = None
     topic_id: str | None = None
+    allow_web_knowledge: bool = False
 
 
 class ValidateRequest(BaseModel):
@@ -76,6 +87,56 @@ class FeedbackRequest(BaseModel):
 
 
 DAILY_QUESTION_LIMIT = 50
+
+
+def _resolve_generation_template(
+    database: Database,
+    template_id: str,
+    *,
+    allow_web_knowledge: bool,
+) -> QuestionTemplateDocument:
+    """Load a configured blueprint or provide a safe web-workshop fallback."""
+    template_data = database.question_templates.find_one({"_id": template_id, "status": "active"})
+    if template_data:
+        return QuestionTemplateDocument.model_validate(template_data)
+    if not allow_web_knowledge:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found.")
+
+    fallback = database.question_templates.find_one({"status": "active"})
+    if fallback:
+        return QuestionTemplateDocument.model_validate(fallback)
+    return QuestionTemplateDocument(
+        id=template_id or "default-web-template",
+        name="Calibrated Standard Blueprint",
+        question_type="MCQ",
+        pattern="Direct Concept",
+        required_fields=["question_text", "options", "explanation"],
+        supported_difficulties=["Easy", "Medium", "Hard"],
+        supported_bloom_levels=["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"],
+        version="1.0",
+        marks=1,
+        total_marks=1,
+        status="active",
+    )
+
+
+def _open_domain_chunks(query: str) -> list[dict]:
+    """Provide a bounded, traceable fallback context for the web workshop."""
+    from app.models import DocumentChunkDocument
+
+    synthetic_chunk = DocumentChunkDocument(
+        id="web-knowledge-chunk-1",
+        study_material_id="open-web-knowledge",
+        chunk_index=0,
+        page_number=1,
+        content=(
+            f"Comprehensive open-domain web reference on {query}. "
+            f"Covers fundamental concepts, theoretical models, practical applications, analysis, evaluation, "
+            f"and core engineering principles regarding {query}."
+        ),
+        metadata={"source": "open_domain_web", "topic": query},
+    )
+    return [{"chunk": synthetic_chunk, "score": 1.0}]
 
 
 def _reserve_daily_quota(database: Database, user_id: str, requested: int) -> dict:
@@ -112,31 +173,12 @@ def _personal_guidance(database: Database, user_id: str) -> str | None:
     return " ".join(parts) or None
 
 
-def generate_questions(payload: GenerateRequest, database: Database, user_id: str | None = None) -> list[GeneratedQuestion]:
-    template_data = database.question_templates.find_one({"_id": payload.template_id, "status": "active"})
-    if not template_data:
-        if payload.allow_web_knowledge:
-            template_data = database.question_templates.find_one({"status": "active"})
-            if not template_data:
-                template = QuestionTemplateDocument(
-                    id=payload.template_id or "default-web-template",
-                    name="Calibrated Standard Blueprint",
-                    question_type="MCQ",
-                    pattern="Direct Concept",
-                    required_fields=["question_text", "options", "explanation"],
-                    supported_difficulties=["Easy", "Medium", "Hard"],
-                    supported_bloom_levels=["Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"],
-                    version="1.0",
-                    marks=1,
-                    total_marks=1,
-                    status="active",
-                )
-            else:
-                template = QuestionTemplateDocument.model_validate(template_data)
-        else:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found.")
-    else:
-        template = QuestionTemplateDocument.model_validate(template_data)
+def generate_questions(payload: GenerateRequest, database: Database, user_id: str | None = None, trace=None) -> list[GeneratedQuestion]:
+    template = _resolve_generation_template(
+        database,
+        payload.template_id,
+        allow_web_knowledge=payload.allow_web_knowledge,
+    )
     chunks = RetrievalService(database).retrieve(
         payload.query,
         top_k=payload.top_k,
@@ -145,22 +187,11 @@ def generate_questions(payload: GenerateRequest, database: Database, user_id: st
         syllabus_id=payload.syllabus_id,
         topic_id=payload.topic_id,
     )
+    if trace:
+        trace(f"Retrieved {len(chunks)} ranked source chunks for query '{payload.query[:120]}'.", stage="retrieval")
     if not chunks:
         if payload.allow_web_knowledge:
-            from app.models import DocumentChunkDocument
-            synthetic_chunk = DocumentChunkDocument(
-                id="web-knowledge-chunk-1",
-                study_material_id="open-web-knowledge",
-                chunk_index=0,
-                page_number=1,
-                content=(
-                    f"Comprehensive open-domain web reference on {payload.query}. "
-                    f"Covers fundamental concepts, theoretical models, practical applications, analysis, evaluation, "
-                    f"and core engineering principles regarding {payload.query}."
-                ),
-                metadata={"source": "open_domain_web", "topic": payload.query},
-            )
-            chunks = [{"chunk": synthetic_chunk, "score": 1.0}]
+            chunks = _open_domain_chunks(payload.query)
         else:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -169,6 +200,15 @@ def generate_questions(payload: GenerateRequest, database: Database, user_id: st
     try:
         settings = get_settings()
         provider = _configured_provider(settings)
+        if provider is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No AI generation model is available. Configure a supported provider API key and model, then try again.",
+            )
+        _attach_failover_trace(provider, trace)
+        critic_provider = _configured_provider(settings, settings.llm_critic_model) if settings.llm_critic_model else provider
+        if critic_provider is not provider:
+            _attach_failover_trace(critic_provider, trace)
         existing_questions = _existing_questions(
             database,
             subject_id=payload.subject_id,
@@ -176,14 +216,19 @@ def generate_questions(payload: GenerateRequest, database: Database, user_id: st
             template_id=payload.template_id,
         )
         try:
-            return QuestionGenerationGraph(provider=provider).generate(
+            return QuestionGenerationGraph(provider=provider, critic_provider=critic_provider).generate(
                 template=template,
                 chunks=chunks,
                 difficulty=payload.difficulty,
                 bloom_level=payload.bloom_level,
                 candidate_count=payload.candidate_count,
-                existing_questions=existing_questions, guidance=_personal_guidance(database, user_id) if user_id else None,
+                existing_questions=existing_questions, guidance=_personal_guidance(database, user_id) if user_id else None, trace=trace,
             )
+        except ProviderRateLimitError:
+            # The deterministic baseline cannot produce production-quality
+            # distractors or concept synthesis. Never silently publish it when
+            # a hosted model is temporarily unavailable.
+            raise
         except GenerationError:
             if provider is None:
                 raise
@@ -194,8 +239,10 @@ def generate_questions(payload: GenerateRequest, database: Database, user_id: st
                 difficulty=payload.difficulty,
                 bloom_level=payload.bloom_level,
                 candidate_count=payload.candidate_count,
-                existing_questions=existing_questions, guidance=_personal_guidance(database, user_id) if user_id else None,
+                existing_questions=existing_questions, guidance=_personal_guidance(database, user_id) if user_id else None, trace=trace,
             )
+    except ProviderRateLimitError as error:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="The configured question model is rate-limited. No fallback paper was created; retry after the provider cooldown.") from error
     except GenerationError as error:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
 
@@ -207,7 +254,14 @@ def generate(
     user: UserDocument = QuestionUser,
 ) -> list[GeneratedQuestion]:
     _reserve_daily_quota(database, user.id, payload.candidate_count)
-    return generate_questions(payload, database, user.id)
+    run = generation_runs.begin(request_type="single", user_id=user.id, on_update=lambda item: _persist_run(database, item))
+    try:
+        questions = generate_questions(payload, database, user.id, trace=run.log)
+        generation_runs.complete(run, [question.model_dump() for question in questions])
+        return questions
+    except Exception as error:
+        generation_runs.fail(run, error)
+        raise
 
 
 @router.post("/generate/batch", response_model=list[list[GeneratedQuestion]])
@@ -217,7 +271,17 @@ def generate_batch(
     user: UserDocument = QuestionUser,
 ) -> list[list[GeneratedQuestion]]:
     _reserve_daily_quota(database, user.id, sum(request.candidate_count for request in payload.requests))
-    return [generate_questions(request, database, user.id) for request in payload.requests]
+    run = generation_runs.begin(request_type="batch", user_id=user.id, on_update=lambda item: _persist_run(database, item))
+    try:
+        results = []
+        for index, request in enumerate(payload.requests, start=1):
+            run.log(f"Starting batch item {index}/{len(payload.requests)}.", stage="batch")
+            results.append(generate_questions(request, database, user.id, trace=run.log))
+        generation_runs.complete(run, [question.model_dump() for group in results for question in group])
+        return results
+    except Exception as error:
+        generation_runs.fail(run, error)
+        raise
 
 
 @router.post("/generate/paper", response_model=list[GeneratedQuestion])
@@ -227,22 +291,41 @@ def generate_paper(
     user: UserDocument = QuestionUser,
     trace=None,
 ) -> list[GeneratedQuestion]:
-    template_data = database.question_templates.find_one({"_id": payload.template_id, "status": "active"})
-    if not template_data:
-        raise HTTPException(status_code=404, detail="Template not found.")
-    template = QuestionTemplateDocument.model_validate(template_data)
+    template = _resolve_generation_template(
+        database,
+        payload.template_id,
+        allow_web_knowledge=payload.allow_web_knowledge,
+    )
     try:
-        chunks = RetrievalService(database).retrieve_all(
-            subject_id=payload.subject_id,
-            study_material_id=payload.material_id,
-            course_id=payload.course_id,
-            syllabus_id=payload.syllabus_id,
-            topic_id=payload.topic_id,
-        )
+        retrieval = RetrievalService(database)
+        if payload.material_id:
+            chunks = retrieval.retrieve_all(
+                subject_id=payload.subject_id,
+                study_material_id=payload.material_id,
+                course_id=payload.course_id,
+                syllabus_id=payload.syllabus_id,
+                topic_id=payload.topic_id,
+            )
+        elif payload.query:
+            chunks = retrieval.retrieve(
+                payload.query,
+                top_k=payload.top_k,
+                subject_id=payload.subject_id,
+                course_id=payload.course_id,
+                syllabus_id=payload.syllabus_id,
+                topic_id=payload.topic_id,
+            )
+        else:
+            chunks = []
         if trace:
-            trace(f"Retrieved {len(chunks)} indexed source chunks.", stage="retrieval")
+            trace(f"Retrieved {len(chunks)} source chunks for paper generation.", stage="retrieval")
         if not chunks:
-            raise HTTPException(status_code=422, detail="No indexed source chunks are available for this material. Upload the material and try again.")
+            if payload.allow_web_knowledge and payload.query:
+                chunks = _open_domain_chunks(payload.query)
+                if trace:
+                    trace("No local source chunks found; using open-domain workshop context.", stage="retrieval")
+            else:
+                raise HTTPException(status_code=422, detail="No indexed source chunks are available. Upload material or provide a competitive-exam topic.")
         generated: list[GeneratedQuestion] = []
         existing_questions = _existing_questions(
             database,
@@ -252,12 +335,23 @@ def generate_paper(
         )
         settings = get_settings()
         provider = _configured_provider(settings)
+        if provider is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="No AI generation model is available. Configure a supported provider API key and model, then try again.",
+            )
+        _attach_failover_trace(provider, trace)
+        critic_provider = _configured_provider(settings, settings.llm_critic_model) if settings.llm_critic_model else provider
+        if critic_provider is not provider:
+            _attach_failover_trace(critic_provider, trace)
         sections = template.sections or [{
             "question_type": template.question_type,
             "pattern": template.pattern,
-            "count": 1,
+            "count": payload.question_count,
             "marks": template.marks,
         }]
+        # A paper request must honour the complete selected blueprint. Each
+        # section contributes its configured number of questions to one paper.
         for section_index, section in enumerate(sections, start=1):
             section_difficulties = [str(value) for value in section.get("supported_difficulties", [])] or [payload.difficulty]
             section_blooms = [str(value) for value in section.get("supported_bloom_levels", [])] or [payload.bloom_level]
@@ -283,16 +377,19 @@ def generate_paper(
             for (difficulty, bloom_level), candidate_count in allocations.items():
                 try:
                     generated.extend(
-                        QuestionGenerationGraph(provider=provider).generate(
+                        QuestionGenerationGraph(provider=provider, critic_provider=critic_provider).generate(
                             template=section_template,
                             chunks=chunks,
                             difficulty=difficulty,
                             bloom_level=bloom_level,
-                            candidate_count=candidate_count,
-                            existing_questions=existing_questions + generated,
-                            trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
+                                candidate_count=candidate_count,
+                                existing_questions=existing_questions + generated,
+                                allow_partial=True,
+                                trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
                         )
                     )
+                except ProviderRateLimitError:
+                    raise
                 except GenerationError:
                     if provider is None:
                         raise
@@ -305,12 +402,15 @@ def generate_paper(
                             chunks=chunks,
                             difficulty=difficulty,
                             bloom_level=bloom_level,
-                            candidate_count=candidate_count,
-                            existing_questions=existing_questions + generated,
-                            trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
+                                candidate_count=candidate_count,
+                                existing_questions=existing_questions + generated,
+                                allow_partial=True,
+                                trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
                         )
                     )
         return generated
+    except ProviderRateLimitError as error:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="The configured question model is rate-limited. No fallback paper was created; retry after the provider cooldown.") from error
     except (GenerationError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -321,18 +421,34 @@ def start_generate_paper(
     database: Database = Depends(get_database),
     user: UserDocument = QuestionUser,
 ) -> dict:
-    template = database.question_templates.find_one({"_id": payload.template_id, "status": "active"})
-    if not template:
-        raise HTTPException(status_code=404, detail="Template not found.")
-    sections = template.get("sections") or [{"count": 1}]
+    template = _resolve_generation_template(
+        database,
+        payload.template_id,
+        allow_web_knowledge=payload.allow_web_knowledge,
+    )
+    sections = template.sections or [{"count": payload.question_count}]
     _reserve_daily_quota(database, user.id, sum(int(section["count"]) for section in sections))
     def worker(run: GenerationRun) -> list[dict]:
         run.log("Retrieving indexed source context.", stage="retrieval")
         questions = generate_paper(payload, database, trace=run.log)
         return [question.model_dump() for question in questions]
 
-    run = generation_runs.create(worker)
+    run = generation_runs.create(worker, request_type="paper", user_id=user.id, on_update=lambda item: _persist_run(database, item))
     return run.snapshot()
+
+
+@router.get("/generate/runs")
+def list_generation_runs(
+    limit: int = 50,
+    user: UserDocument = QuestionUser,
+    database: Database = Depends(get_database),
+) -> list[dict]:
+    bounded_limit = max(1, min(limit, 100))
+    persisted = list(database.generation_runs.find({"user_id": user.id}, {"_id": 0}).sort("started_at", -1).limit(bounded_limit))
+    live = {run.id: run.snapshot() for run in generation_runs.list(user_id=user.id, limit=bounded_limit)}
+    merged = {str(item["id"]): item for item in persisted}
+    merged.update(live)
+    return sorted(merged.values(), key=lambda item: item.get("started_at", ""), reverse=True)[:bounded_limit]
 
 
 @router.get("/usage")
@@ -348,31 +464,45 @@ def generation_usage(database: Database = Depends(get_database), user: UserDocum
 def get_generation_run(
     run_id: str,
     _: UserDocument = QuestionUser,
+    database: Database = Depends(get_database),
 ) -> dict:
     run = generation_runs.get(run_id)
-    if run is None:
+    if run is not None and run.user_id is not None and run.user_id != _.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found.")
-    return run.snapshot()
+    if run is not None:
+        return run.snapshot()
+    persisted = database.generation_runs.find_one({"_id": run_id, "user_id": _.id}, {"_id": 0})
+    if persisted is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generation run not found.")
+    return persisted
 
 
-def _configured_provider(settings: Settings):
-    if settings.llm_provider.lower() == "openrouter" and settings.openrouter_api_key:
-        return OpenRouterProvider(
-            settings.openrouter_api_key,
-            settings.openrouter_model,
-            settings.openrouter_app_name,
-            settings.openrouter_timeout_seconds,
-        )
+def _configured_provider(settings: Settings, model_override: str | None = None):
+    # OpenRouter keys are used in order. We advance only on HTTP 429; NVIDIA
+    # is intentionally the final hosted fallback for this deployment.
+    openrouter_configs = (
+        (settings.openrouter_api_key, settings.openrouter_model, settings.openrouter_app_name, settings.openrouter_timeout_seconds),
+        (settings.openrouter2_api_key, settings.openrouter2_model or settings.openrouter_model, settings.openrouter2_app_name or settings.openrouter_app_name, settings.openrouter2_timeout_seconds or settings.openrouter_timeout_seconds),
+        (settings.openrouter3_api_key, settings.openrouter3_model or settings.openrouter_model, settings.openrouter3_app_name or settings.openrouter_app_name, settings.openrouter3_timeout_seconds or settings.openrouter_timeout_seconds),
+    )
+    providers = [
+        OpenRouterProvider(api_key, model_override or model, app_name, timeout)
+        for api_key, model, app_name, timeout in openrouter_configs
+        if api_key
+    ]
+    if settings.nvidia_api_key:
+        providers.append(NvidiaProvider(settings.nvidia_api_key, model_override or settings.nvidia_model, settings.nvidia_base_url, settings.nvidia_timeout_seconds))
+    if providers:
+        return FailoverProvider(providers)
     if settings.llm_provider.lower() == "openai" and settings.openai_api_key:
-        return OpenAICompatibleProvider(settings.openai_api_key, settings.openai_model)
-    if settings.llm_provider.lower() in {"nvidia", "nvidia-nim", "kimi-k3"} and settings.nvidia_api_key:
-        return NvidiaProvider(
-            settings.nvidia_api_key,
-            settings.nvidia_model,
-            settings.nvidia_base_url,
-            settings.nvidia_timeout_seconds,
-        )
+        return OpenAICompatibleProvider(settings.openai_api_key, model_override or settings.openai_model)
     return None
+
+
+def _attach_failover_trace(provider: object, trace) -> None:
+    """Record route rotation without exposing API keys in request traces."""
+    if trace and isinstance(provider, FailoverProvider):
+        provider.on_failover = lambda message: trace(message, stage="model_failover", level="warning")
 
 
 def _existing_questions(

@@ -19,16 +19,47 @@ def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+_NOISE_LINE = re.compile(
+    r"(?:[\w.+-]+@[\w.-]+\.[a-z]{2,}|this file is meant for personal use|"
+    r"all rights reserved|copyright|do not distribute|watermark)",
+    re.IGNORECASE,
+)
+_OPAQUE_ID = re.compile(r"^[A-Z0-9_-]{8,}$")
+
+
+def clean_document_pages(pages: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Remove extraction noise before chunks are embedded or exposed to a model."""
+    page_lines = [(page, [line.strip() for line in text.splitlines() if line.strip()]) for page, text in pages]
+    occurrences: dict[str, int] = {}
+    for _, lines in page_lines:
+        for line in set(lines):
+            occurrences[line.casefold()] = occurrences.get(line.casefold(), 0) + 1
+
+    cleaned: list[tuple[int, str]] = []
+    for page, lines in page_lines:
+        useful = [
+            line for line in lines
+            if not _NOISE_LINE.search(line)
+            and not _OPAQUE_ID.fullmatch(line)
+            # Repeated short lines are normally page headers/footers, not content.
+            and not (len(page_lines) > 1 and occurrences.get(line.casefold(), 0) >= 2 and len(line) < 120)
+        ]
+        value = clean_text(" ".join(useful))
+        if value:
+            cleaned.append((page, value))
+    return cleaned
+
+
 def extract_pages(filename: str, content: bytes) -> list[tuple[int, str]]:
     suffix = filename.rsplit(".", 1)[-1].lower()
     if suffix == "txt":
-        return [(1, clean_text(content.decode("utf-8")))]
+        return [(1, content.decode("utf-8"))]
     if suffix == "pdf":
-        return [(index + 1, clean_text(page.extract_text() or "")) for index, page in enumerate(PdfReader(io.BytesIO(content)).pages)]
+        return [(index + 1, page.extract_text() or "") for index, page in enumerate(PdfReader(io.BytesIO(content)).pages)]
     if suffix == "docx":
-        return [(1, clean_text(" ".join(item.text for item in Document(io.BytesIO(content)).paragraphs)))]
+        return [(1, "\n".join(item.text for item in Document(io.BytesIO(content)).paragraphs))]
     if suffix == "pptx":
-        return [(index + 1, clean_text(" ".join(shape.text for shape in slide.shapes if hasattr(shape, "text")))) for index, slide in enumerate(Presentation(io.BytesIO(content)).slides)]
+        return [(index + 1, "\n".join(shape.text for shape in slide.shapes if hasattr(shape, "text"))) for index, slide in enumerate(Presentation(io.BytesIO(content)).slides)]
     raise DocumentProcessingError("Unsupported document type.")
 
 
@@ -109,7 +140,7 @@ class DocumentProcessingService:
             raise DocumentProcessingError("Stored material is unavailable.")
 
         try:
-            pages = extract_pages(material.filename, path.read_bytes())
+            pages = clean_document_pages(extract_pages(material.filename, path.read_bytes()))
             chunks = chunk_pages(pages)
         except Exception as error:
             self.database.study_materials.update_one({"_id": material.id}, {"$set": {"status": "failed"}})

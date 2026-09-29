@@ -54,9 +54,13 @@ def search(
         topic_id=payload.topic_id,
     )
     return {
+        "strategy": "hybrid_dense_lexical_mmr",
         "results": [
             {
                 "score": result["score"],
+                "semantic_score": result.get("semantic_score"),
+                "lexical_score": result.get("lexical_score"),
+                "hybrid_score": result.get("hybrid_score"),
                 "chunk": result["chunk"],
             }
             for result in results

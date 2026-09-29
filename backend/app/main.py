@@ -47,7 +47,7 @@ rate_limit_windows: dict[str, deque[float]] = defaultdict(deque)
 def is_generation_status_poll(request: Request) -> bool:
     """The authenticated, read-only job-status endpoint is intentionally polled."""
     return request.method == "GET" and bool(
-        re.fullmatch(r"/api/questions/generate/runs/[A-Za-z0-9-]+", request.url.path)
+        re.fullmatch(r"/api/questions/generate/runs(?:/[A-Za-z0-9-]+)?", request.url.path)
     )
 
 

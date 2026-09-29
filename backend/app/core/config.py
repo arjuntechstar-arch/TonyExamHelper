@@ -20,12 +20,21 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=30, ge=1, le=1440)
     max_upload_bytes: int = Field(default=20 * 1024 * 1024, ge=1)
     llm_provider: str = "deterministic"
+    llm_critic_model: str | None = None
     openai_api_key: str | None = None
     openai_model: str = "gpt-4o-mini"
     openrouter_api_key: str | None = None
     openrouter_model: str = "openrouter/auto"
     openrouter_app_name: str = "Atlas Exam Studio"
     openrouter_timeout_seconds: int = Field(default=30, ge=10, le=300)
+    openrouter2_api_key: str | None = None
+    openrouter2_model: str | None = None
+    openrouter2_app_name: str | None = None
+    openrouter2_timeout_seconds: int | None = Field(default=None, ge=10, le=300)
+    openrouter3_api_key: str | None = None
+    openrouter3_model: str | None = None
+    openrouter3_app_name: str | None = None
+    openrouter3_timeout_seconds: int | None = Field(default=None, ge=10, le=300)
     nvidia_api_key: str | None = None
     nvidia_model: str = "moonshotai/kimi-k3"
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"

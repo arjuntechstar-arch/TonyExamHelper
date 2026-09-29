@@ -91,6 +91,50 @@ def cosine_similarity(left: Iterable[float], right: Iterable[float]) -> float:
     return sum(a * b for a, b in zip(left_values, right_values, strict=True)) / (left_magnitude * right_magnitude)
 
 
+def lexical_similarity(left: str, right: str) -> float:
+    """A transparent sparse-search signal used alongside vector similarity."""
+    left_tokens = set(re.findall(r"[a-z0-9]+", left.casefold()))
+    right_tokens = set(re.findall(r"[a-z0-9]+", right.casefold()))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+
+
+def rerank_hybrid(query: str, candidates: list[dict], top_k: int) -> list[dict]:
+    """Combine dense and sparse relevance, then avoid near-identical chunks.
+
+    The lightweight MMR pass expands coverage for question generation without
+    requiring a hosted search engine.  Each returned item retains its component
+    scores so the UI and evaluation endpoints can explain retrieval quality.
+    """
+    scored = []
+    for candidate in candidates:
+        chunk = candidate["chunk"]
+        semantic_score = float(candidate["score"])
+        lexical_score = lexical_similarity(query, chunk.content)
+        scored.append({
+            **candidate,
+            "semantic_score": semantic_score,
+            "lexical_score": lexical_score,
+            "hybrid_score": (0.75 * semantic_score) + (0.25 * lexical_score),
+        })
+    remaining = sorted(scored, key=lambda item: item["hybrid_score"], reverse=True)
+    selected: list[dict] = []
+    while remaining and len(selected) < top_k:
+        def mmr_score(item: dict) -> float:
+            redundancy = max(
+                (lexical_similarity(item["chunk"].content, chosen["chunk"].content) for chosen in selected),
+                default=0.0,
+            )
+            return (0.85 * item["hybrid_score"]) - (0.15 * redundancy)
+
+        best = max(remaining, key=mmr_score)
+        best["score"] = round(mmr_score(best), 6)
+        selected.append(best)
+        remaining.remove(best)
+    return selected
+
+
 class RetrievalService:
     def __init__(self, database: Database, embedding_provider: EmbeddingProvider | None = None) -> None:
         self.database = database
@@ -143,7 +187,13 @@ class RetrievalService:
             if value is not None
         }
         query_embedding = self.embedding_provider.embed(query)
-        return self.vector_store.search(query_embedding, top_k=top_k, filters=filters)
+        # Retrieve a broader dense candidate pool before hybrid re-ranking.
+        candidates = self.vector_store.search(
+            query_embedding,
+            top_k=min(150, max(top_k * 4, top_k)),
+            filters=filters,
+        )
+        return rerank_hybrid(query, candidates, top_k)
 
     def retrieve_all(
         self,
