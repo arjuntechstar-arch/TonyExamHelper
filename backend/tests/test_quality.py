@@ -2,7 +2,7 @@ import pytest
 
 from app.models import QuestionTemplateDocument
 from app.services.generation import GeneratedQuestion, QuestionOption, QuestionSource
-from app.services.quality import QualityConfig, QuestionQualityService, context_relevance, lexical_similarity
+from app.services.quality import QualityConfig, QuestionQualityService, context_relevance, lexical_similarity, validate_paper
 
 
 def template() -> QuestionTemplateDocument:
@@ -123,3 +123,71 @@ def test_quality_rejects_template_shell_and_generic_distractors() -> None:
     )
 
     assert {issue.code for issue in result.issues} >= {"template_shell", "generic_distractor"}
+
+
+def test_paper_validation_catches_cross_format_semantic_duplicates() -> None:
+    mcq = GeneratedQuestion(
+        question_text="Why do N-gram language models give low probabilities to unseen combinations of synonymous words?",
+        options=[
+            QuestionOption(key="A", text="They rely on observed token sequences and cannot generalize unseen combinations."),
+            QuestionOption(key="B", text="They always assign equal probability to every word."),
+            QuestionOption(key="C", text="They ignore the words that come before a token."),
+            QuestionOption(key="D", text="They only evaluate grammar rules."),
+        ],
+        correct_answer="A",
+        explanation="N-grams estimate probability from observed local sequences.",
+        difficulty="Medium",
+        bloom_level="Understand",
+        sources=[QuestionSource(chunk_id="chunk-1", page=2)],
+        question_type="MCQ",
+        pattern="Direct Concept",
+        marks=1,
+    )
+    short_answer = GeneratedQuestion(
+        question_text="Explain the N-gram limitation for unseen synonym word combinations.",
+        options=[],
+        correct_answer=None,
+        expected_answer="N-gram models rely on observed sequences, so unseen synonymous combinations receive low probability.",
+        explanation="The model cannot infer an unobserved local sequence from synonymy alone.",
+        difficulty="Medium",
+        bloom_level="Analyze",
+        sources=[QuestionSource(chunk_id="chunk-1", page=2)],
+        question_type="Short Answer",
+        pattern="Explain",
+        marks=2,
+    )
+
+    issues = validate_paper(
+        [mcq, short_answer],
+        sections=[
+            {"question_type": "MCQ", "pattern": "Direct Concept", "count": 1, "marks": 1},
+            {"question_type": "Short Answer", "pattern": "Explain", "count": 1, "marks": 2},
+        ],
+    )
+
+    assert any(issue.code == "semantic_duplicate" for issue in issues)
+
+
+def test_paper_validation_requires_a_real_expected_answer_for_written_responses() -> None:
+    written = GeneratedQuestion(
+        question_text="Explain the limitation of an N-gram model.",
+        options=[QuestionOption(key="A", text="A placeholder MCQ option")],
+        correct_answer="A",
+        expected_answer="Key Answer: Verified",
+        explanation="The model has a limited context window.",
+        difficulty="Medium",
+        bloom_level="Analyze",
+        sources=[QuestionSource(chunk_id="chunk-1", page=2)],
+        question_type="Short Answer",
+        pattern="Explain",
+        marks=2,
+    )
+
+    issues = validate_paper(
+        [written],
+        sections=[{"question_type": "Short Answer", "pattern": "Explain", "count": 1, "marks": 2}],
+    )
+
+    assert {issue.code for issue in issues} >= {
+        "descriptive_options", "descriptive_correct_answer", "placeholder_expected_answer",
+    }

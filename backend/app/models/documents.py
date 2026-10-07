@@ -96,6 +96,7 @@ class QuestionDocument(AuditDocument):
     question_text: str
     options: list[dict[str, str]] = Field(default_factory=list)
     correct_answer: str | None = None
+    expected_answer: str | None = None
     explanation: str
     difficulty: str
     bloom_level: str

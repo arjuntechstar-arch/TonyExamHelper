@@ -529,7 +529,7 @@
 
                     <div class="accordion-bar">
                       <button class="btn-reveal-toggle" (click)="toggleAnswer($index)">
-                        <span>{{ isAnswerRevealed($index) ? 'Hide Explanation & Rationale' : 'Reveal Correct Answer & Rationale' }}</span>
+                        <span>{{ isAnswerRevealed($index) ? 'Hide Explanation & Rationale' : (isWrittenResponse(q) ? 'Reveal Expected Answer & Rationale' : 'Reveal Correct Answer & Rationale') }}</span>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" [class.rotated]="isAnswerRevealed($index)"><polyline points="6 9 12 15 18 9"/></svg>
                       </button>
                     </div>
@@ -540,8 +540,13 @@
                           <strong>Pedagogical Explanation:</strong>
                           @if (q.correct_answer) {
                             <span class="ans-pill">Key: {{ q.correct_answer }}</span>
+                          } @else if (q.expected_answer) {
+                            <span class="ans-pill">Expected answer</span>
                           }
                         </div>
+                        @if (q.expected_answer) {
+                          <p><strong>Expected Answer:</strong> {{ q.expected_answer }}</p>
+                        }
                         <p>{{ q.explanation }}</p>
 
                         @if (q.sources && q.sources[0]) {
@@ -1039,7 +1044,11 @@
                 </div>
 
                 <div class="q-footer">
-                  <span class="q-answer">Key Answer: <strong>{{ q.correct_answer || 'Verified' }}</strong></span>
+                  @if (q.correct_answer) {
+                    <span class="q-answer">Key Answer: <strong>{{ q.correct_answer }}</strong></span>
+                  } @else {
+                    <span class="q-answer">Expected Answer: <strong>{{ q.expected_answer }}</strong></span>
+                  }
                   <p class="q-expl">Rationale: {{ q.explanation }}</p>
                 </div>
               </div>

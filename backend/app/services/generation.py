@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, ValidationError
 import httpx
 
 from app.models import QuestionTemplateDocument
+from app.services.assessment_schema import is_mcq_question_type
 
 
 _provider_pacing_lock = Lock()
@@ -37,6 +38,7 @@ class GeneratedQuestion(BaseModel):
     question_type: str = "MCQ"
     pattern: str = "Direct Concept"
     marks: int = Field(default=1, ge=1, le=100)
+    expected_answer: str | None = Field(default=None, max_length=3_000)
 
 
 class LLMProvider(Protocol):
@@ -63,6 +65,20 @@ class DeterministicLLMProvider:
         evidence = re.split(r"(?<=[.!?])\s+", content.strip(), maxsplit=1)[0].rstrip(".!?")
         answer = paraphrase_evidence(evidence)
         concept = concept_label(evidence)
+        question_type = prompt_value(prompt, "TYPE")
+        pattern = prompt_value(prompt, "PATTERN")
+        marks = int(prompt_value(prompt, "MARKS") or 1)
+        if not is_mcq_question_type(question_type):
+            return {
+                "question_text": descriptive_stem(concept, pattern),
+                "options": [],
+                "correct_answer": None,
+                "expected_answer": descriptive_expected_answer(answer, marks),
+                "explanation": f"The expected response should accurately apply the source concept: {answer}.",
+                "difficulty": prompt_value(prompt, "DIFFICULTY"),
+                "bloom_level": prompt_value(prompt, "BLOOM"),
+                "sources": [{"chunk_id": source_id, "page": int(page)}],
+            }
         stems = (
             f"Which principle is illustrated by {concept}?",
             f"How should {concept} be interpreted in this context?",
@@ -86,6 +102,7 @@ class DeterministicLLMProvider:
                 {"key": "D", "text": "The outcome is determined without using this concept."},
             ],
             "correct_answer": "A",
+            "expected_answer": None,
             "explanation": f"The correct choice follows from the relationship described in the evidence: {answer}. The other choices contradict or do not follow from that relationship.",
             "difficulty": prompt_value(prompt, "DIFFICULTY"),
             "bloom_level": prompt_value(prompt, "BLOOM"),
@@ -436,8 +453,8 @@ def build_prompt(
                 if question.strip()
             ),
             f"FIELDS|{','.join(template.required_fields)}",
-            'JSON_SCHEMA|{"question_text":"string","options":[{"key":"A","text":"string"},{"key":"B","text":"string"},{"key":"C","text":"string"},{"key":"D","text":"string"}],"correct_answer":"A or null","explanation":"string","difficulty":"requested difficulty","bloom_level":"requested Bloom level","sources":[{"chunk_id":"SOURCE chunk id","page":1}]}',
-            "FACT records are the approved factual representation extracted from retrieval. Construct an assessment from their concepts and relationships; never quote, truncate, or paste a FACT into the question or an option. For MCQ provide exactly four concise, distinct, conceptually related options: one correct answer and three plausible misconceptions. Do not use generic distractors, negated answers, 'not supported', 'all of the above', or 'none of the above'. For non-MCQ use an empty options list and null correct_answer. Generate a teacher-written question, not a summary. Use only FACT records and follow the pattern exactly.",
+            'JSON_SCHEMA|{"question_text":"string","options":[{"key":"A","text":"string"},{"key":"B","text":"string"},{"key":"C","text":"string"},{"key":"D","text":"string"}],"correct_answer":"A or null","expected_answer":"string or null","explanation":"string","difficulty":"requested difficulty","bloom_level":"requested Bloom level","sources":[{"chunk_id":"SOURCE chunk id","page":1}]}',
+            "FACT records are the approved factual representation extracted from retrieval. Construct an assessment from their concepts and relationships; never quote, truncate, or paste a FACT into the question or an option. For MCQ provide exactly four concise, distinct, conceptually related options: one correct answer and three plausible misconceptions, and set expected_answer to null. Do not use generic distractors, negated answers, 'not supported', 'all of the above', or 'none of the above'. For non-MCQ use an empty options list, null correct_answer, and a concrete expected_answer that lists the facts or points a student must state. Never use placeholders such as 'Verified', 'Key Answer: Verified', or 'see rationale'. Generate a teacher-written question, not a summary. Use only FACT records and follow the pattern exactly.",
             "Use a distinct assessment angle for this candidate: rotate among concept, explanation, comparison, scenario, application, error correction, inference, case analysis, and problem solving. If source text contains a formula, values, or a procedure, prefer a new worked problem or solution task. Never paraphrase an AVOID_QUESTION; test a different fact, relationship, condition, or application.",
             "MARKS controls task depth: 1 mark tests one fact; 2 marks requires an application, comparison, or a why/how justification; 5 or more marks requires a multi-step scenario, analysis, calculation, or case response. BLOOM controls the reasoning operation, not the opening phrase.",
             *source_lines,
@@ -486,6 +503,27 @@ def concept_label(evidence: str) -> str:
     ignored = {"a", "an", "the", "is", "are", "was", "were", "of", "for", "to", "and", "in", "on", "with", "that", "this"}
     words = [word for word in re.findall(r"[A-Za-z][A-Za-z0-9-]*", evidence) if word.casefold() not in ignored]
     return " ".join(words[:6]) or "the source concept"
+
+
+def descriptive_stem(concept: str, pattern: str) -> str:
+    """Produce a response-oriented fallback stem that honours the section pattern."""
+    normalized_pattern = pattern.casefold()
+    if "compare" in normalized_pattern or "differentiate" in normalized_pattern:
+        return f"Compare the role and limitation of {concept} using the source material."
+    if "apply" in normalized_pattern or "problem" in normalized_pattern:
+        return f"Explain how {concept} should be applied in an appropriate situation."
+    if "case" in normalized_pattern or "analy" in normalized_pattern:
+        return f"Analyze how {concept} affects the situation described in the source material."
+    return f"Explain {concept} using the source material."
+
+
+def descriptive_expected_answer(answer: str, marks: int) -> str:
+    """Supply the actual response criterion, never a status placeholder."""
+    if marks >= 5:
+        return f"A complete answer should explain the concept, apply it to the stated situation, and justify the conclusion. Core point: {answer}."
+    if marks >= 2:
+        return f"Expected points: identify the relevant concept and explain why it applies. Core point: {answer}."
+    return f"Expected answer: {answer}."
 
 
 def shuffle_mcq_options(question: GeneratedQuestion, candidate_index: int) -> GeneratedQuestion:

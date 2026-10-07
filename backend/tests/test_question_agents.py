@@ -1,8 +1,8 @@
 import pytest
 
 from app.models import DocumentChunkDocument, QuestionTemplateDocument
-from app.services.generation import GenerationError, ProviderRateLimitError
-from app.services.question_agents import CriticVerdict, QuestionGenerationGraph, select_context_window
+from app.services.generation import GeneratedQuestion, GenerationError, ProviderRateLimitError, QuestionOption, QuestionSource
+from app.services.question_agents import CriticVerdict, LLMQuestionCriticAgent, QuestionGenerationGraph, select_context_window
 
 
 def template() -> QuestionTemplateDocument:
@@ -69,8 +69,22 @@ def test_graph_uses_a_new_assessment_angle_when_material_is_reused() -> None:
 
 
 def test_graph_balances_mcq_answer_positions() -> None:
+    diverse_chunks = [
+        {
+            "chunk": DocumentChunkDocument(
+                study_material_id="material-1", chunk_index=index, page_number=index + 1, content=content,
+            ),
+            "score": 0.9,
+        }
+        for index, content in enumerate([
+            "Trees place smaller values on left.",
+            "Hashes map keys to stored values.",
+            "Stacks remove latest items first.",
+            "Queues remove earliest items first.",
+        ])
+    ]
     results = QuestionGenerationGraph().generate(
-        template=template(), chunks=chunks(), difficulty="Medium", bloom_level="Apply", candidate_count=4
+        template=template(), chunks=diverse_chunks, difficulty="Medium", bloom_level="Apply", candidate_count=4
     )
 
     assert {question.correct_answer for question in results} == {"A", "B", "C", "D"}
@@ -116,6 +130,53 @@ def test_critic_normalizes_a_ten_point_quality_score() -> None:
     })
 
     assert verdict.quality_score == 0.95
+
+
+def test_hosted_critic_rejects_a_semantic_duplicate_across_question_formats() -> None:
+    class SemanticDuplicateProvider:
+        provider_name = "semantic-duplicate-provider"
+
+        def generate_structured(self, prompt: str) -> dict:
+            assert "EXISTING_QUESTION|1|Short Answer" in prompt
+            return {
+                "grounded": True, "answerable": True, "single_correct_answer": True,
+                "question_complete": True, "distractors_plausible": True, "contains_source_noise": False,
+                "bloom_match": True, "difficulty_match": True, "mark_match": True,
+                "semantic_duplicate": True, "quality_score": 0.95,
+                "problems": ["Candidate assesses the same N-gram limitation."],
+            }
+
+    candidate = GeneratedQuestion(
+        question_text="Why do N-gram models assign low probability to unseen synonym combinations?",
+        options=[
+            QuestionOption(key="A", text="They rely on observed local sequences."),
+            QuestionOption(key="B", text="They use every synonym interchangeably."),
+            QuestionOption(key="C", text="They ignore token order."),
+            QuestionOption(key="D", text="They only measure punctuation."),
+        ],
+        correct_answer="A",
+        explanation="N-grams estimate from observed local sequences.",
+        difficulty="Medium",
+        bloom_level="Understand",
+        sources=[QuestionSource(chunk_id="chunk-1", page=1)],
+    )
+    existing = candidate.model_copy(update={
+        "question_type": "Short Answer",
+        "options": [],
+        "correct_answer": None,
+        "expected_answer": "N-grams rely on observed sequences and therefore struggle with unseen synonym combinations.",
+    })
+
+    issues = LLMQuestionCriticAgent(SemanticDuplicateProvider()).validate(
+        candidate,
+        context=["N-gram models estimate from observed local token sequences."],
+        template=template(),
+        existing_questions=[existing],
+    )
+
+    assert len(issues) == 1
+    assert issues[0].code == "llm_critic"
+    assert "same N-gram limitation" in issues[0].message
 
 
 def test_solver_disagreement_rejects_a_hosted_candidate() -> None:
@@ -252,6 +313,7 @@ def test_graph_generates_ten_pattern_difficulty_bloom_combinations(
         supported_difficulties=[difficulty],
         supported_bloom_levels=[bloom_level],
         version="1.0",
+        marks=1 if question_type == "MCQ" else 2,
     )
 
     generated = QuestionGenerationGraph().generate(
@@ -266,3 +328,5 @@ def test_graph_generates_ten_pattern_difficulty_bloom_combinations(
     assert generated[0].pattern == pattern
     assert generated[0].difficulty == difficulty
     assert generated[0].bloom_level == bloom_level
+    if question_type != "MCQ":
+        assert generated[0].expected_answer

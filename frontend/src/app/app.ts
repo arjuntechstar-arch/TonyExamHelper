@@ -128,7 +128,8 @@ export interface Question {
   difficulty: string;
   bloom_level: string;
   options: QuestionOption[];
-  correct_answer?: string;
+  correct_answer?: string | null;
+  expected_answer?: string | null;
   explanation: string;
   sources?: QuestionSource[];
 }
@@ -1104,10 +1105,22 @@ export class App {
     return q.correct_answer === key;
   }
 
+  public isWrittenResponse(q: Question): boolean {
+    if (q.correct_answer) {
+      return false;
+    }
+    const type = (q.question_type || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const isMcq = ['mcq', 'multiple choice', 'multiple choice question'].includes(type);
+    return Boolean(q.expected_answer?.trim()) || !isMcq;
+  }
+
   public copyQuestion(q: Question): void {
+    const answer = q.correct_answer
+      ? `Correct Answer: ${q.correct_answer}`
+      : `Expected Answer: ${q.expected_answer || q.explanation}`;
     const text = `${q.question_text}\n` +
       q.options.map(o => `(${o.key}) ${o.text}`).join('\n') +
-      `\nCorrect Answer: ${q.correct_answer || 'Verified'}\nExplanation: ${q.explanation}`;
+      `\n${answer}\nExplanation: ${q.explanation}`;
     if (navigator?.clipboard?.writeText) {
       navigator.clipboard.writeText(text);
     }

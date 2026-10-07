@@ -214,7 +214,7 @@ def test_paper_generation_falls_back_when_configured_provider_fails(monkeypatch:
             study_material_id="material-1",
             chunk_index=index,
             page_number=index + 1,
-            content=f"Topic{index} explains a distinct evaluation principle.",
+            content=f"Topic{index} uses mechanism{index} to produce outcome{index}.",
             embedding=[1.0],
         )
         database.document_chunks.insert_one(document.model_dump(by_alias=True))

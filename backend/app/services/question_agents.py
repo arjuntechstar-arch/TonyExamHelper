@@ -11,6 +11,7 @@ import re
 from pydantic import BaseModel, Field, field_validator
 
 from app.models import QuestionTemplateDocument
+from app.services.assessment_schema import is_mcq_question_type, section_format_error
 from app.services.generation import DeterministicLLMProvider, MAX_CONTEXT_CHUNKS, GeneratedQuestion, GenerationError, GenerationService, LLMProvider, ProviderRateLimitError, source_evidence
 from app.services.quality import QuestionQualityService, ValidationIssue
 
@@ -99,6 +100,9 @@ def select_context_window(chunks: list[dict], candidate_index: int, max_chunks: 
 class PatternValidationAgent:
     def validate(self, question: GeneratedQuestion, template: QuestionTemplateDocument) -> list[ValidationIssue]:
         issues: list[ValidationIssue] = []
+        format_error = section_format_error(template.question_type, template.pattern, template.marks)
+        if format_error:
+            issues.append(ValidationIssue(code="blueprint_format", message=format_error))
         if question.question_type.casefold() != template.question_type.casefold():
             issues.append(ValidationIssue(code="question_type", message="Question type does not match the template."))
         if question.pattern.casefold() != template.pattern.casefold():
@@ -107,12 +111,24 @@ class PatternValidationAgent:
             issues.append(ValidationIssue(code="question_text", message="Question text is required."))
         if "explanation" in template.required_fields and not question.explanation.strip():
             issues.append(ValidationIssue(code="explanation", message="Explanation is required."))
-        if template.question_type.casefold() == "mcq":
+        if is_mcq_question_type(template.question_type):
             keys = [option.key for option in question.options]
             if len(keys) != 4 or len(keys) != len(set(keys)):
                 issues.append(ValidationIssue(code="mcq_options", message="MCQ must contain exactly four unique options."))
             if question.correct_answer not in keys:
                 issues.append(ValidationIssue(code="correct_answer", message="Correct answer must reference an option key."))
+            if question.expected_answer and question.expected_answer.strip():
+                issues.append(ValidationIssue(code="mcq_expected_answer", message="MCQ must use an option key rather than a written expected answer."))
+        else:
+            if question.options:
+                issues.append(ValidationIssue(code="descriptive_options", message="Written-response questions cannot include MCQ options."))
+            if question.correct_answer is not None:
+                issues.append(ValidationIssue(code="descriptive_correct_answer", message="Written-response questions cannot use an option-key answer."))
+            expected_answer = (question.expected_answer or "").strip()
+            if not expected_answer:
+                issues.append(ValidationIssue(code="expected_answer", message="Written-response questions require a concrete expected answer."))
+            elif re.fullmatch(r"(?:key\s*answer\s*[:\-]?\s*)?verified|see\s+(?:the\s+)?rationale", expected_answer, re.IGNORECASE):
+                issues.append(ValidationIssue(code="placeholder_expected_answer", message="Expected answer must contain assessable response points, not a verification placeholder."))
         return issues
 
 
@@ -147,6 +163,7 @@ class CriticVerdict(BaseModel):
     bloom_match: bool
     difficulty_match: bool
     mark_match: bool
+    semantic_duplicate: bool = False
     quality_score: float = Field(ge=0, le=1)
     problems: list[str] = Field(default_factory=list)
 
@@ -177,18 +194,34 @@ class LLMQuestionCriticAgent:
     def enabled(self) -> bool:
         return not isinstance(self.provider, DeterministicLLMProvider)
 
-    def validate(self, question: GeneratedQuestion, *, context: list[str], template: QuestionTemplateDocument) -> list[ValidationIssue]:
+    def validate(
+        self,
+        question: GeneratedQuestion,
+        *,
+        context: list[str],
+        template: QuestionTemplateDocument,
+        existing_questions: list[GeneratedQuestion] | None = None,
+    ) -> list[ValidationIssue]:
         if not self.enabled:
             return []
         evidence = "\n".join(f"EVIDENCE|{source_evidence(item)}" for item in context if source_evidence(item))
+        comparison_set = (existing_questions or [])[-12:]
         prompt = "\n".join([
             "ROLE|QUESTION_CRITIC",
+            "Compare the candidate's assessed concept and answer criterion against every EXISTING_QUESTION, not merely identical wording. Set semantic_duplicate true if it tests substantially the same knowledge or expected response.",
+            "For an MCQ, single_correct_answer means exactly one option is correct. For a written response, set it true when EXPECTED_ANSWER provides concrete, assessable response points; false if it is missing or only a placeholder.",
             "Return only one JSON object. Critique the candidate without rewriting it. quality_score must be a decimal from 0.0 to 1.0, never a 0–10 grade.",
-            "JSON_SCHEMA|{\"grounded\":true,\"answerable\":true,\"single_correct_answer\":true,\"question_complete\":true,\"distractors_plausible\":true,\"contains_source_noise\":false,\"bloom_match\":true,\"difficulty_match\":true,\"mark_match\":true,\"quality_score\":0.0,\"problems\":[\"string\"]}",
+            "JSON_SCHEMA|{\"grounded\":true,\"answerable\":true,\"single_correct_answer\":true,\"question_complete\":true,\"distractors_plausible\":true,\"contains_source_noise\":false,\"bloom_match\":true,\"difficulty_match\":true,\"mark_match\":true,\"semantic_duplicate\":false,\"quality_score\":0.0,\"problems\":[\"string\"]}",
             f"TYPE|{template.question_type}", f"PATTERN|{template.pattern}", f"MARKS|{template.marks}",
             f"DIFFICULTY|{question.difficulty}", f"BLOOM|{question.bloom_level}",
             f"QUESTION|{question.question_text}",
             *(f"OPTION|{option.key}|{option.text}" for option in question.options),
+            f"EXPECTED_ANSWER|{question.expected_answer or ''}",
+            "SEMANTIC_DUPLICATE_FIELD|Include semantic_duplicate as true or false in the JSON verdict.",
+            *(
+                f"EXISTING_QUESTION|{index}|{item.question_type}|{item.question_text}|{item.correct_answer or item.expected_answer or item.explanation}"
+                for index, item in enumerate(comparison_set, start=1)
+            ),
             f"EXPLANATION|{question.explanation}", evidence,
         ])
         verdict: CriticVerdict | None = None
@@ -209,6 +242,8 @@ class LLMQuestionCriticAgent:
         ]
         if verdict.contains_source_noise:
             failed.append("contains_source_noise")
+        if verdict.semantic_duplicate:
+            failed.append("semantic_duplicate")
         if verdict.quality_score < 0.80:
             failed.append("quality_score")
         return [ValidationIssue(code="llm_critic", message="; ".join(verdict.problems or failed or ["Critic rejected candidate."]))] if failed else []
@@ -225,7 +260,7 @@ class IndependentAnswerSolverAgent:
         return not isinstance(self.provider, DeterministicLLMProvider)
 
     def validate(self, question: GeneratedQuestion, *, context: list[str]) -> list[ValidationIssue]:
-        if not self.enabled or question.question_type.casefold() != "mcq":
+        if not self.enabled or not is_mcq_question_type(question.question_type):
             return []
         evidence = "\n".join(f"EVIDENCE|{source_evidence(item)}" for item in context if source_evidence(item))
         prompt = "\n".join([
@@ -337,7 +372,12 @@ class QuestionGenerationGraph:
                             stage="question_validation",
                         )
                 if not issues:
-                    issues = self.critic.validate(question, context=context, template=template)
+                    issues = self.critic.validate(
+                        question,
+                        context=context,
+                        template=template,
+                        existing_questions=accepted,
+                    )
                     if trace:
                         trace(f"LLM critic: {'passed' if not issues else issues[0].message}", stage="llm_critic")
                 if not issues:

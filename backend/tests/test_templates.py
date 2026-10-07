@@ -77,3 +77,37 @@ def test_pattern_blueprint_requires_matching_total_marks() -> None:
                 {"question_type": "Descriptive", "pattern": "Long Answer", "count": 2, "marks": 5},
             ],
         )
+
+
+def test_blueprint_rejects_a_written_response_section_with_one_mark() -> None:
+    with pytest.raises(ValueError, match="at least 2 marks"):
+        TemplatePayload(
+            name="Invalid short-answer section",
+            question_type="MCQ",
+            pattern="Direct Concept",
+            required_fields=["question_text"],
+            supported_difficulties=["Medium"],
+            supported_bloom_levels=["Apply"],
+            version="1.0",
+            total_marks=1,
+            sections=[
+                {"question_type": "Short Answer", "pattern": "Explain", "count": 1, "marks": 1},
+            ],
+        )
+
+
+def test_blueprint_rejects_a_written_response_pattern_in_an_mcq_section() -> None:
+    with pytest.raises(ValueError, match="written-response pattern"):
+        TemplatePayload(
+            name="Invalid MCQ section",
+            question_type="MCQ",
+            pattern="Direct Concept",
+            required_fields=["question_text"],
+            supported_difficulties=["Medium"],
+            supported_bloom_levels=["Apply"],
+            version="1.0",
+            total_marks=2,
+            sections=[
+                {"question_type": "MCQ", "pattern": "Explain", "count": 1, "marks": 2},
+            ],
+        )

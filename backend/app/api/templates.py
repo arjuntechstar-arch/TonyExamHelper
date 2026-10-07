@@ -6,6 +6,7 @@ from pymongo.errors import DuplicateKeyError
 from app.api.auth import get_current_user
 from app.core.database import get_database
 from app.models import QuestionTemplateDocument, UserDocument
+from app.services.assessment_schema import section_format_error
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 TemplateUser = Depends(get_current_user)
@@ -18,6 +19,13 @@ class PatternSection(BaseModel):
     marks: int = Field(ge=1, le=100)
     supported_difficulties: list[str] | None = Field(default=None, min_length=1)
     supported_bloom_levels: list[str] | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_question_format(self) -> "PatternSection":
+        error = section_format_error(self.question_type, self.pattern, self.marks)
+        if error:
+            raise ValueError(error)
+        return self
 
 
 class TemplatePayload(BaseModel):
@@ -133,6 +141,10 @@ def update_template(
         sections = changes.get("sections", current.get("sections", []))
         total_marks = changes.get("total_marks", current.get("total_marks", current.get("marks", 1)))
         if sections:
+            for section in sections:
+                error = section_format_error(str(section["question_type"]), str(section["pattern"]), int(section["marks"]))
+                if error:
+                    raise HTTPException(status_code=422, detail=error)
             expected = sum(section["count"] * section["marks"] for section in sections)
             if expected != total_marks:
                 raise HTTPException(status_code=422, detail="total_marks must equal the sum of section count × marks.")

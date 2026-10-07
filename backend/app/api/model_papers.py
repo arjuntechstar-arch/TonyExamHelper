@@ -7,6 +7,7 @@ from app.core.database import get_database
 from app.models import ModelPaperDocument, QuestionDocument, UserDocument
 from app.services.generation import GeneratedQuestion
 from app.services.model_papers import ModelPaperError, ModelPaperService
+from app.services.quality import validate_paper
 
 router = APIRouter(prefix="/model-papers", tags=["model-papers"])
 PaperUser = Depends(get_current_user)
@@ -59,6 +60,19 @@ def save_generated_paper(
     user: UserDocument = PaperUser,
 ) -> ModelPaperDocument:
     """Persist a generated paper as reviewable drafts without bypassing approval."""
+    sections = None
+    if payload.template_id:
+        template = database.question_templates.find_one({"_id": payload.template_id, "status": "active"})
+        if template:
+            sections = template.get("sections") or [{
+                "question_type": template["question_type"],
+                "pattern": template["pattern"],
+                "count": len(payload.questions),
+                "marks": template.get("marks", 1),
+            }]
+    issues = validate_paper(payload.questions, sections=sections)
+    if issues:
+        raise HTTPException(status_code=422, detail="; ".join(issue.message for issue in issues[:3]))
     questions = [
         QuestionDocument(
             question_type=question.question_type,
@@ -66,6 +80,7 @@ def save_generated_paper(
             question_text=question.question_text,
             options=[option.model_dump() for option in question.options],
             correct_answer=question.correct_answer,
+            expected_answer=question.expected_answer,
             explanation=question.explanation,
             difficulty=question.difficulty,
             bloom_level=question.bloom_level,

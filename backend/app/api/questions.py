@@ -10,10 +10,11 @@ from app.api.auth import get_current_user
 from app.core.database import get_database
 from app.core.config import Settings, get_settings
 from app.models import QuestionDocument, QuestionTemplateDocument, UserDocument
+from app.services.assessment_schema import section_format_error
 from app.services.generation import FailoverProvider, GeneratedQuestion, GenerationError, NvidiaProvider, OpenAICompatibleProvider, OpenRouterProvider, ProviderRateLimitError
 from app.services.question_agents import QuestionGenerationGraph
 from app.services.generation_runs import generation_runs, GenerationRun
-from app.services.quality import QuestionQualityService, ValidationResult
+from app.services.quality import QuestionQualityService, ValidationResult, validate_paper
 from app.services.retrieval import RetrievalService
 
 router = APIRouter(prefix="/questions", tags=["questions"])
@@ -316,7 +317,12 @@ def generate_paper(
                 topic_id=payload.topic_id,
             )
         else:
-            chunks = []
+            chunks = retrieval.retrieve_all(
+                subject_id=payload.subject_id,
+                course_id=payload.course_id,
+                syllabus_id=payload.syllabus_id,
+                topic_id=payload.topic_id,
+            )
         if trace:
             trace(f"Retrieved {len(chunks)} source chunks for paper generation.", stage="retrieval")
         if not chunks:
@@ -350,6 +356,10 @@ def generate_paper(
             "count": payload.question_count,
             "marks": template.marks,
         }]
+        for section in sections:
+            format_error = section_format_error(str(section["question_type"]), str(section["pattern"]), int(section["marks"]))
+            if format_error:
+                raise GenerationError(format_error)
         # A paper request must honour the complete selected blueprint. Each
         # section contributes its configured number of questions to one paper.
         for section_index, section in enumerate(sections, start=1):
@@ -408,6 +418,14 @@ def generate_paper(
                                 trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
                         )
                     )
+        paper_issues = validate_paper(generated, sections=sections)
+        if paper_issues:
+            detail = "; ".join(issue.message for issue in paper_issues[:3])
+            if trace:
+                trace(f"Final paper validation rejected the draft: {detail}", stage="paper_validation")
+            raise GenerationError(detail)
+        if trace:
+            trace("Final paper validation passed: blueprint, response schema, and semantic uniqueness verified.", stage="paper_validation")
         return generated
     except ProviderRateLimitError as error:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="The configured question model is rate-limited. No fallback paper was created; retry after the provider cooldown.") from error
@@ -548,6 +566,7 @@ def create_question(
         question_text=payload.question.question_text,
         options=[option.model_dump() for option in payload.question.options],
         correct_answer=payload.question.correct_answer,
+        expected_answer=payload.question.expected_answer,
         explanation=payload.question.explanation,
         difficulty=payload.question.difficulty,
         bloom_level=payload.question.bloom_level,

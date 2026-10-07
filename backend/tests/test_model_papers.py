@@ -97,7 +97,10 @@ def test_model_paper_rejects_unsatisfied_blueprint(database) -> None:
 def test_generated_paper_can_be_previewed_and_downloaded_as_pdf(database) -> None:
     generated = GeneratedQuestion(
         question_text="Which side contains smaller binary-search-tree values?",
-        options=[{"key": "A", "text": "Left"}, {"key": "B", "text": "Right"}],
+        options=[
+            {"key": "A", "text": "Left"}, {"key": "B", "text": "Right"},
+            {"key": "C", "text": "Both"}, {"key": "D", "text": "Neither"},
+        ],
         correct_answer="A",
         explanation="Smaller values are stored on the left.",
         difficulty="Medium",
