@@ -1,11 +1,19 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+from pymongo.errors import DuplicateKeyError
 
 from app.core.config import get_settings
 from app.core.database import get_database
 from app.models import UserDocument
-from app.schemas import CurrentUserResponse, LoginRequest, TokenResponse, ProfileUpdateRequest, PasswordUpdateRequest
+from app.schemas import (
+    CurrentUserResponse,
+    LoginRequest,
+    PasswordUpdateRequest,
+    ProfileUpdateRequest,
+    RegisterRequest,
+    TokenResponse,
+)
 from app.services.auth import AuthService, AuthenticationError, AuthorizationError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -45,6 +53,20 @@ def login(payload: LoginRequest, service: AuthService = Depends(get_auth_service
         user = service.authenticate(payload.email, payload.password)
     except AuthenticationError as error:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(error)) from error
+    return TokenResponse(access_token=service.issue_token(user))
+
+
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+def register(payload: RegisterRequest, service: AuthService = Depends(get_auth_service)) -> TokenResponse:
+    try:
+        user = service.create_user(
+            email=payload.email,
+            display_name=payload.email.split("@", maxsplit=1)[0],
+            password=payload.password,
+            roles=[payload.role],
+        )
+    except DuplicateKeyError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with this email already exists.") from error
     return TokenResponse(access_token=service.issue_token(user))
 
 

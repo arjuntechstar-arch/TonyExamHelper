@@ -84,7 +84,7 @@ def save_generated_paper(
             explanation=question.explanation,
             difficulty=question.difficulty,
             bloom_level=question.bloom_level,
-            sources=[source.model_dump() for source in question.sources],
+            sources=[source.model_dump(exclude_none=True) for source in question.sources],
             template_id=payload.template_id,
             subject_id=payload.subject_id,
             marks=question.marks,

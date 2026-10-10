@@ -1,9 +1,33 @@
 from fastapi.testclient import TestClient
 
+from app.api.health import health
+from app.core.config import Settings
 from app.main import app
 
 
 client = TestClient(app)
+
+
+def test_health_reports_selected_ollama_model_without_openrouter_fallback() -> None:
+    response = health(Settings(
+        _env_file=None,
+        llm_provider="ollama",
+        ollama_base_url="https://example-123.ngrok-free.app",
+        ollama_model="qwen2.5:32b",
+        openrouter_api_key="test-openrouter-key",
+    ))
+
+    assert response.model_status == "configured"
+    assert response.model_provider == "Ollama"
+    assert response.model_name == "qwen2.5:32b"
+
+
+def test_health_reports_ollama_unavailable_until_tunnel_url_is_set() -> None:
+    response = health(Settings(_env_file=None, llm_provider="ollama"))
+
+    assert response.model_status == "unavailable"
+    assert response.model_provider == "Ollama"
+    assert response.model_name is None
 
 
 def test_health_returns_contract_and_request_id() -> None:

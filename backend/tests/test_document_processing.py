@@ -32,6 +32,7 @@ def test_upload_processes_text_and_preserves_chunk_metadata(document_service: Do
     assert chunk["page_number"] == 1
     assert chunk["metadata"] == {
         "source_file": "notes.txt",
+        "study_material_id": material.id,
         "subject_id": "subject-1",
         "course_id": "course-1",
         "syllabus_id": "syllabus-1",

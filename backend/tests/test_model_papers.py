@@ -119,5 +119,6 @@ def test_generated_paper_can_be_previewed_and_downloaded_as_pdf(database) -> Non
 
     assert preview.paper.name == "Unit 1 Test"
     assert preview.questions[0].question_text == generated.question_text
+    assert preview.questions[0].sources == [{"chunk_id": "chunk-1", "page": 1}]
     assert download.media_type == "application/pdf"
     assert download.body.startswith(b"%PDF-1.4")

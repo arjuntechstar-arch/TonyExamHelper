@@ -5,15 +5,21 @@ pipeline can later be backed by LangGraph/LangChain or exposed as MCP tools
 without changing the API contract.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import re
+from time import perf_counter
+from typing import Callable
+
+import httpx
 
 from pydantic import BaseModel, Field, field_validator
 
 from app.models import QuestionTemplateDocument
 from app.services.assessment_schema import is_mcq_question_type, section_format_error
 from app.services.generation import DeterministicLLMProvider, MAX_CONTEXT_CHUNKS, GeneratedQuestion, GenerationError, GenerationService, LLMProvider, ProviderRateLimitError, source_evidence
-from app.services.quality import QuestionQualityService, ValidationIssue
+from app.services.generation_decision import JevDecisionAgent
+from app.services.quality import QuestionQualityService, ValidationIssue, ValidationResult
 
 
 @dataclass(frozen=True)
@@ -21,6 +27,48 @@ class AgentState:
     candidates: list[GeneratedQuestion]
     accepted: list[GeneratedQuestion]
     rejected: list[str]
+
+
+class TimedLLMProvider:
+    def __init__(self, provider: LLMProvider, trace: Callable[..., None]) -> None:
+        self.provider = provider
+        self.trace = trace
+
+    @property
+    def provider_name(self) -> str:
+        return self.provider.provider_name
+
+    def generate_structured(self, prompt: str) -> dict:
+        if prompt.startswith("ROLE|QUESTION_CRITIC\n"):
+            role = "critic"
+        elif prompt.startswith("ROLE|INDEPENDENT_ANSWER_SOLVER\n"):
+            role = "solver"
+        else:
+            role = "generation"
+        started = perf_counter()
+        failed = False
+        try:
+            return self.provider.generate_structured(prompt)
+        except Exception:
+            failed = True
+            raise
+        finally:
+            duration_ms = (perf_counter() - started) * 1000
+            metric_deltas: dict[str, int | float] = {
+                "model_calls": 1,
+                f"{role}_calls": 1,
+                "model_duration_ms": duration_ms,
+                f"{role}_duration_ms": duration_ms,
+            }
+            if failed:
+                metric_deltas["model_failures"] = 1
+            self.trace(
+                f"{role.capitalize()} model call took {duration_ms / 1000:.2f}s.",
+                stage=f"{role}_model",
+                duration_ms=duration_ms,
+                level="error" if failed else "info",
+                metric_deltas=metric_deltas,
+            )
 
 
 class QuestionPreparingAgent:
@@ -144,13 +192,27 @@ class QuestionValidationAgent:
         context: list[str],
         existing_questions: list[GeneratedQuestion],
     ) -> list[ValidationIssue]:
-        result = self.quality.validate(
+        return self.evaluate(
+            question,
+            template=template,
+            context=context,
+            existing_questions=existing_questions,
+        ).issues
+
+    def evaluate(
+        self,
+        question: GeneratedQuestion,
+        *,
+        template: QuestionTemplateDocument,
+        context: list[str],
+        existing_questions: list[GeneratedQuestion],
+    ) -> ValidationResult:
+        return self.quality.validate(
             question,
             template=template,
             context=context,
             existing_questions=existing_questions,
         )
-        return result.issues
 
 
 class CriticVerdict(BaseModel):
@@ -192,7 +254,8 @@ class LLMQuestionCriticAgent:
 
     @property
     def enabled(self) -> bool:
-        return not isinstance(self.provider, DeterministicLLMProvider)
+        provider = getattr(self.provider, "provider", self.provider)
+        return not isinstance(provider, DeterministicLLMProvider)
 
     def validate(
         self,
@@ -232,6 +295,8 @@ class LLMQuestionCriticAgent:
                 break
             except ProviderRateLimitError:
                 raise
+            except (httpx.TransportError, httpx.HTTPStatusError) as error:
+                return [ValidationIssue(code="critic_unavailable", message="Question critic service is unavailable; automatic network retries were stopped.")]
             except Exception as error:
                 last_error = error
         if verdict is None:
@@ -257,7 +322,8 @@ class IndependentAnswerSolverAgent:
 
     @property
     def enabled(self) -> bool:
-        return not isinstance(self.provider, DeterministicLLMProvider)
+        provider = getattr(self.provider, "provider", self.provider)
+        return not isinstance(provider, DeterministicLLMProvider)
 
     def validate(self, question: GeneratedQuestion, *, context: list[str]) -> list[ValidationIssue]:
         if not self.enabled or not is_mcq_question_type(question.question_type):
@@ -277,6 +343,8 @@ class IndependentAnswerSolverAgent:
                 break
             except ProviderRateLimitError:
                 raise
+            except (httpx.TransportError, httpx.HTTPStatusError) as error:
+                return [ValidationIssue(code="solver_unavailable", message="Independent answer solver service is unavailable; automatic network retries were stopped.")]
             except Exception as error:
                 last_error = error
         if verdict is None:
@@ -301,6 +369,7 @@ class QuestionGenerationGraph:
         self.preparer = QuestionPreparingAgent(self.generator)
         self.pattern_validator = PatternValidationAgent()
         self.question_validator = QuestionValidationAgent()
+        self.decision_agent = JevDecisionAgent()
         verification_provider = critic_provider or self.generator.provider
         self.critic = LLMQuestionCriticAgent(verification_provider)
         self.solver = IndependentAnswerSolverAgent(verification_provider)
@@ -314,22 +383,45 @@ class QuestionGenerationGraph:
         difficulty: str,
         bloom_level: str,
         candidate_count: int = 1,
+        question_offset: int = 0,
         existing_questions: list[GeneratedQuestion] | None = None,
         allow_partial: bool = False,
         trace=None,
         guidance: str | None = None,
+        run_llm_review: bool = True,
+        retrieve_additional_evidence: Callable[[GeneratedQuestion], list[dict]] | None = None,
     ) -> list[GeneratedQuestion]:
         if candidate_count < 1 or candidate_count > 20:
             raise GenerationError("candidate_count must be between 1 and 20.")
-        context = [result["chunk"].content for result in chunks]
+        candidate_index = 0
+        if trace:
+            original_trace = trace
+            def trace(message, **kwargs):
+                details = dict(kwargs.pop("details", None) or {})
+                details["question_index"] = question_offset + candidate_index + 1
+                original_trace(message, details=details, **kwargs)
+        if trace:
+            self.generator.provider = TimedLLMProvider(self.generator.provider, trace)
+            self.preparer.generator.provider = self.generator.provider
+            self.critic.provider = TimedLLMProvider(self.critic.provider, trace)
+            self.solver.provider = self.critic.provider
         accepted = list(existing_questions or [])
         rejected: list[str] = []
         generation_offset = len(accepted)
         for candidate_index in range(candidate_count):
+            candidate_chunks = list(chunks)
+            candidate_context = [result["chunk"].content for result in candidate_chunks]
+            retrieval_expansion_used = False
             if trace:
                 trace(f"Preparing candidate {candidate_index + 1}/{candidate_count}.", stage="preparing")
             question: GeneratedQuestion | None = None
             for attempt in range(self.max_attempts_per_question):
+                if attempt and trace:
+                    trace(
+                        f"Retrying candidate {candidate_index + 1} after validation failure (attempt {attempt + 1}).",
+                        stage="candidate_retry",
+                        metric_deltas={"candidate_retries": 1},
+                    )
                 if trace:
                     trace(f"Calling model for candidate {candidate_index + 1}, attempt {attempt + 1}.", stage="model")
                 try:
@@ -339,7 +431,7 @@ class QuestionGenerationGraph:
                     attempt_index = generation_offset + candidate_index + (attempt * candidate_count)
                     question = self.preparer.prepare(
                         template=template,
-                        chunks=chunks,
+                        chunks=candidate_chunks,
                         difficulty=difficulty,
                         bloom_level=bloom_level,
                         candidate_index=attempt_index,
@@ -359,36 +451,152 @@ class QuestionGenerationGraph:
                         f"Pattern validation: {'passed' if not issues else ', '.join(issue.code for issue in issues)}.",
                         stage="pattern_validation",
                     )
+                quality_result = None
                 if not issues:
-                    issues = self.question_validator.validate(
+                    quality_result = self.question_validator.evaluate(
                         question,
                         template=template,
-                        context=context,
+                        context=candidate_context,
                         existing_questions=accepted,
                     )
+                    issues = quality_result.issues
                     if trace:
                         trace(
                             f"Question validation: {'passed' if not issues else '; '.join(f'{issue.code}: {issue.message}' for issue in issues)}.",
                             stage="question_validation",
                         )
-                if not issues:
-                    issues = self.critic.validate(
+                decision = None
+                if not issues and quality_result is not None:
+                    decision = self.decision_agent.decide(
                         question,
-                        context=context,
                         template=template,
-                        existing_questions=accepted,
+                        context_chunks=candidate_chunks,
+                        validation=quality_result,
+                        strict_review_requested=run_llm_review,
+                        allow_retrieval_expansion=(
+                            retrieve_additional_evidence is not None
+                            and not retrieval_expansion_used
+                            and attempt + 1 < self.max_attempts_per_question
+                        ),
                     )
                     if trace:
-                        trace(f"LLM critic: {'passed' if not issues else issues[0].message}", stage="llm_critic")
-                if not issues:
-                    issues = self.solver.validate(question, context=context)
+                        trace(
+                            (
+                                f"Jev decision: {decision.action} "
+                                f"(evidence confidence {decision.evidence_confidence:.2f}; "
+                                f"reasons: {', '.join(decision.reasons) or 'none'})."
+                            ),
+                            stage="jev_decision",
+                            metric_deltas={
+                                "jev_decisions": 1,
+                                "jev_review_escalations": int(decision.review_required),
+                                "jev_retrieval_requests": int(decision.action == "retrieve_more_evidence"),
+                                "jev_evidence_confidence_total": decision.evidence_confidence,
+                            },
+                            details={"decision": decision.model_dump()},
+                        )
+                if (
+                    not issues
+                    and decision is not None
+                    and decision.action == "retrieve_more_evidence"
+                    and retrieve_additional_evidence is not None
+                    and question is not None
+                ):
+                    retrieval_started = perf_counter()
+                    additional_chunks = retrieve_additional_evidence(question)
+                    known_chunk_ids = {str(item["chunk"].id) for item in candidate_chunks}
+                    new_chunks = [
+                        item for item in additional_chunks
+                        if str(item["chunk"].id) not in known_chunk_ids
+                    ]
+                    retrieval_duration_ms = (perf_counter() - retrieval_started) * 1000
+                    retrieval_expansion_used = True
+                    if new_chunks:
+                        candidate_chunks.extend(new_chunks)
+                        candidate_context = [
+                            result["chunk"].content for result in candidate_chunks
+                        ]
+                        if trace:
+                            trace(
+                                f"Jev added {len(new_chunks)} new source chunks; retrying once with expanded evidence.",
+                                stage="jev_retrieval",
+                                duration_ms=retrieval_duration_ms,
+                                metric_deltas={
+                                    "retrieval_duration_ms": retrieval_duration_ms,
+                                    "jev_retrieval_expansions": 1,
+                                },
+                            )
+                        continue
+
+                    decision = decision.model_copy(update={
+                        "action": "review_with_hosted_checks",
+                        "review_required": True,
+                        "reasons": [*decision.reasons, "no_additional_evidence"],
+                    })
                     if trace:
-                        trace(f"Independent solver: {'passed' if not issues else issues[0].message}", stage="independent_solver")
+                        trace(
+                            "Jev found no new source chunks; escalating to hosted review.",
+                            stage="jev_retrieval",
+                            duration_ms=retrieval_duration_ms,
+                            metric_deltas={
+                                "retrieval_duration_ms": retrieval_duration_ms,
+                                "jev_review_escalations": 1,
+                            },
+                        )
+                if not issues and decision is not None and decision.review_required:
+                    if self.critic.enabled and self.solver.enabled:
+                        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="question-review") as reviewers:
+                            critic_result = reviewers.submit(
+                                self.critic.validate,
+                                question,
+                                context=candidate_context,
+                                template=template,
+                                existing_questions=accepted,
+                            )
+                            solver_result = reviewers.submit(
+                                self.solver.validate,
+                                question,
+                                context=candidate_context,
+                            )
+                            critic_issues = critic_result.result()
+                            solver_issues = solver_result.result()
+                    else:
+                        critic_issues = self.critic.validate(
+                            question,
+                            context=candidate_context,
+                            template=template,
+                            existing_questions=accepted,
+                        )
+                        solver_issues = self.solver.validate(question, context=candidate_context)
+                    if trace:
+                        trace(f"LLM critic: {'passed' if not critic_issues else critic_issues[0].message}", stage="llm_critic")
+                        trace(f"Independent solver: {'passed' if not solver_issues else solver_issues[0].message}", stage="independent_solver")
+                    issues = critic_issues + solver_issues
+                    if any(issue.code in {"critic_unavailable", "solver_unavailable"} for issue in issues):
+                        if trace:
+                            trace("Review service unavailable; stopping candidate retries.", stage="review_unavailable", level="error")
+                        raise GenerationError("Required review service is unavailable; candidate retries stopped.")
+                elif not issues and decision is not None and trace:
+                    trace(
+                        "Jev accepted the locally validated question; hosted critic and independent solver were skipped.",
+                        stage="llm_review_skipped",
+                        metric_deltas={"llm_reviews_skipped": 1},
+                    )
                 if not issues:
                     accepted.append(question)
+                    if trace:
+                        trace("Question passed all required checks.", stage="question_accepted")
                     break
                 rejected.extend(issue.code for issue in issues)
+                if trace:
+                    trace(
+                        f"Candidate rejected by validation: {', '.join(issue.code for issue in issues)}.",
+                        stage="candidate_rejected",
+                        metric_deltas={"validation_rejections": 1},
+                    )
             if question is None or not accepted or accepted[-1] is not question:
+                if trace:
+                    trace("Question could not pass validation.", stage="question_failed", level="warning")
                 continue
         generated = accepted[len(existing_questions or []):]
         if len(generated) != candidate_count:

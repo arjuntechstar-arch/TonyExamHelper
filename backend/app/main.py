@@ -143,5 +143,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         status_code=422,
         error="validation_error",
         message="The request is invalid.",
-        details=[dict(error) for error in exc.errors()],
+        details=[
+            {
+                "loc": list(error["loc"]),
+                "msg": error["msg"],
+                "type": error["type"],
+            }
+            for error in exc.errors()
+        ],
     )

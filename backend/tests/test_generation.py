@@ -1,8 +1,11 @@
 import mongomock
 import pytest
 from fastapi import HTTPException
+from threading import Event
+from types import SimpleNamespace
 
-from app.api.questions import GenerateRequest, PaperGenerateRequest, generate_paper, generate_questions
+from app.api.questions import GenerateRequest, PaperGenerateRequest, _configured_provider, generate_paper, generate_questions, start_single_question_generation
+from app.core.config import Settings
 from app.models import DocumentChunkDocument, QuestionTemplateDocument
 from app.services.generation import (
     DeterministicLLMProvider,
@@ -10,9 +13,12 @@ from app.services.generation import (
     GenerationError,
     GenerationService,
     NvidiaProvider,
+    OllamaProvider,
     ProviderRateLimitError,
     parse_chat_completion,
 )
+from app.services.question_agents import QuestionGenerationGraph
+from app.services.generation_runs import generation_runs
 
 
 def template() -> QuestionTemplateDocument:
@@ -38,6 +44,92 @@ def chunk() -> dict:
         ),
         "score": 0.9,
     }
+
+
+def test_ollama_provider_calls_openai_compatible_endpoint_and_parses_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [{
+                    "message": {
+                        "content": '{"question_text":"Example","options":[],"sources":[]}',
+                    },
+                }],
+            }
+
+    def fake_post(url: str, **kwargs) -> Response:
+        captured["url"] = url
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr("app.services.generation.httpx.post", fake_post)
+    provider = OllamaProvider(
+        "https://example-123.ngrok-free.app/",
+        model="qwen2.5:32b",
+        timeout_seconds=420,
+    )
+
+    result = provider.generate_structured("Return a JSON question.")
+
+    assert provider.provider_name == "ollama"
+    assert captured["url"] == "https://example-123.ngrok-free.app/v1/chat/completions"
+    assert captured["headers"]["ngrok-skip-browser-warning"] == "true"
+    assert captured["json"]["model"] == "qwen2.5:32b"
+    assert captured["json"]["stream"] is False
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+    assert captured["timeout"] == 420
+    assert result["question_text"] == "Example"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://example.ngrok-free.app",
+        "https://user:password@example.ngrok-free.app",
+        "https://example.ngrok-free.app?token=secret",
+    ],
+)
+def test_ollama_provider_rejects_insecure_or_ambiguous_urls(base_url: str) -> None:
+    with pytest.raises(ValueError):
+        OllamaProvider(base_url)
+
+
+def test_ollama_provider_accepts_local_http_and_v1_base_url() -> None:
+    provider = OllamaProvider("http://localhost:11434/v1")
+
+    assert provider.endpoint == "http://localhost:11434/v1/chat/completions"
+
+
+def test_ollama_selection_is_direct_and_does_not_fall_back_to_openrouter() -> None:
+    settings = Settings(
+        _env_file=None,
+        llm_provider="ollama",
+        ollama_base_url="https://example-123.ngrok-free.app",
+        ollama_model="qwen2.5:32b",
+        openrouter_api_key="test-openrouter-key",
+    )
+
+    provider = _configured_provider(settings)
+
+    assert isinstance(provider, OllamaProvider)
+    assert provider.model == "qwen2.5:32b"
+
+
+def test_ollama_selection_is_unavailable_without_tunnel_url_even_if_openrouter_is_configured() -> None:
+    settings = Settings(
+        _env_file=None,
+        llm_provider="ollama",
+        openrouter_api_key="test-openrouter-key",
+    )
+
+    assert _configured_provider(settings) is None
 
 
 def test_failover_provider_uses_next_route_only_after_rate_limit() -> None:
@@ -66,6 +158,20 @@ def test_failover_provider_uses_next_route_only_after_rate_limit() -> None:
     assert provider.generate_structured("question") == {"route": "nvidia"}
     assert limited.calls == 1
     assert provider.active_provider_name == "nvidia-nim"
+
+
+def test_failover_provider_reports_the_successful_route() -> None:
+    class WorkingProvider:
+        provider_name = "nvidia-nim"
+
+        def generate_structured(self, prompt: str) -> dict:
+            return {"route": "nvidia"}
+
+    routes: list[str] = []
+    provider = FailoverProvider([WorkingProvider()], on_route=routes.append)
+
+    assert provider.generate_structured("question") == {"route": "nvidia"}
+    assert routes == ["NVIDIA fallback (nvidia-nim)"]
 
 
 class RetryingProvider:
@@ -220,6 +326,14 @@ def test_paper_generation_falls_back_when_configured_provider_fails(monkeypatch:
         database.document_chunks.insert_one(document.model_dump(by_alias=True))
 
     monkeypatch.setattr("app.api.questions._configured_provider", lambda settings: FailingProvider())
+    graph_generate = QuestionGenerationGraph.generate
+    paper_review_modes: list[bool] = []
+
+    def track_paper_reviews(self, *args, **kwargs):
+        paper_review_modes.append(kwargs.get("run_llm_review", True))
+        return graph_generate(self, *args, **kwargs)
+
+    monkeypatch.setattr("app.services.question_agents.QuestionGenerationGraph.generate", track_paper_reviews)
     trace: list[str] = []
     result = generate_paper(
         PaperGenerateRequest(template_id=configured_template.id, difficulty="Medium", bloom_level="Apply"),
@@ -231,6 +345,110 @@ def test_paper_generation_falls_back_when_configured_provider_fails(monkeypatch:
     assert len(result) == 5
     assert all(question.sources for question in result)
     assert any("local grounded fallback" in message for message in trace)
+    assert paper_review_modes and all(paper_review_modes)
+
+
+def test_single_question_validation_mode_defaults_to_strict() -> None:
+    request = GenerateRequest(
+        template_id="template-1",
+        query="binary search trees",
+        difficulty="Medium",
+        bloom_level="Apply",
+    )
+    assert request.validation_mode == "strict"
+
+
+@pytest.mark.parametrize(
+    ("validation_mode", "expected_attempts", "expected_review"),
+    [("fast", 2, False), ("strict", 5, True)],
+)
+def test_single_question_mode_uses_bounded_retry_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    validation_mode: str,
+    expected_attempts: int,
+    expected_review: bool,
+) -> None:
+    database = mongomock.MongoClient().test
+    configured_template = template()
+    database.question_templates.insert_one(configured_template.model_dump(by_alias=True))
+
+    class Retrieval:
+        def retrieve(self, *_args, **_kwargs):
+            return [chunk()]
+
+    observed: dict = {}
+
+    class CapturingGraph:
+        def __init__(self, **kwargs) -> None:
+            observed.update(kwargs)
+
+        def generate(self, **kwargs):
+            observed["run_llm_review"] = kwargs["run_llm_review"]
+            return []
+
+    monkeypatch.setattr("app.api.questions._retrieval_service", lambda _database: Retrieval())
+    monkeypatch.setattr("app.api.questions._configured_provider", lambda *_args: object())
+    monkeypatch.setattr("app.api.questions._existing_questions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("app.api.questions.QuestionGenerationGraph", CapturingGraph)
+
+    result = generate_questions(
+        GenerateRequest(
+            template_id=configured_template.id,
+            query="binary search trees",
+            difficulty="Medium",
+            bloom_level="Apply",
+            validation_mode=validation_mode,
+        ),
+        database,
+    )
+
+    assert result == []
+    assert observed["max_attempts_per_question"] == expected_attempts
+    assert observed["max_retries"] == 1
+    assert observed["run_llm_review"] is expected_review
+
+
+def test_single_question_start_returns_live_run_and_persists_worker_updates(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker_started = Event()
+    allow_worker_to_finish = Event()
+
+    def delayed_generation(payload, database, user_id, trace):
+        worker_started.set()
+        trace("Retrieving evidence.", stage="retrieval")
+        assert allow_worker_to_finish.wait(timeout=2)
+        return []
+
+    monkeypatch.setattr("app.api.questions.generate_questions", delayed_generation)
+    database = mongomock.MongoClient().test
+    user = SimpleNamespace(id="observability-test-user")
+    response = start_single_question_generation(
+        GenerateRequest(
+            template_id="template-1",
+            query="binary search trees",
+            difficulty="Medium",
+            bloom_level="Apply",
+        ),
+        database,
+        user,
+    )
+    try:
+        assert response["request_type"] == "single"
+        assert response["status"] in {"queued", "running"}
+        assert worker_started.wait(timeout=2)
+        run = generation_runs.get(response["id"])
+        assert run is not None
+        assert run.snapshot()["stage"] == "retrieval"
+    finally:
+        allow_worker_to_finish.set()
+
+    for _ in range(100):
+        run = generation_runs.get(response["id"])
+        if run is not None and run.snapshot()["status"] == "completed":
+            break
+        Event().wait(0.01)
+    assert run is not None
+    assert run.snapshot()["status"] == "completed"
+    assert database.generation_runs.find_one({"_id": response["id"]})["stage"] == "completed"
 
 
 def test_generation_accepts_legacy_lowercase_difficulty_and_bloom_values() -> None:
@@ -248,6 +466,13 @@ def test_generation_accepts_legacy_lowercase_difficulty_and_bloom_values() -> No
 
 def test_question_generation_reports_unavailable_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.api.questions._configured_provider", lambda settings: None)
+
+    def mock_web_search(query: str, settings: Settings) -> list[dict]:
+        assert query == "Distributed Consensus Paxos and Raft"
+        assert settings is not None
+        return [chunk()]
+
+    monkeypatch.setattr("app.api.questions._web_search_chunks", mock_web_search)
     database = mongomock.MongoClient().test
     configured_template = template()
     database.question_templates.insert_one(configured_template.model_dump(by_alias=True))

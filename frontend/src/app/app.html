@@ -35,6 +35,12 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 6-7"/></svg>
           Monitoring
         </button>
+        @if (canRunRetrievalBenchmark()) {
+          <button [class.active]="view() === 'Retrieval benchmark'" (click)="navigate('Retrieval benchmark')">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="m7 15 3-4 3 2 5-7"/></svg>
+            Retrieval eval
+          </button>
+        }
         <button [class.active]="view() === 'Practice'" (click)="navigate('Practice')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>
           Practice
@@ -285,16 +291,158 @@
             @if (selectedGenerationRun(); as run) {
               <div class="card-header-bar"><span class="card-title">{{ run.id }}</span><span class="badge-accent">{{ run.status }}</span></div>
               @if (run.error) { <div class="source-mode-banner"><strong>Failure reason</strong><span>{{ run.error }}</span></div> }
+              @if (run.metrics; as metrics) {
+                <div class="generation-metrics">
+                  <span><strong>Total</strong> {{ formatDuration(metrics.total_duration_ms) }}</span>
+                  <span><strong>Retrieval</strong> {{ formatDuration(metrics.retrieval_duration_ms) }}</span>
+                  @if (metrics.web_search_duration_ms !== undefined) {
+                    <span><strong>Web search</strong> {{ formatDuration(metrics.web_search_duration_ms) }}</span>
+                  }
+                  <span><strong>Cumulative model time</strong> {{ formatDuration(metrics.model_duration_ms) }}</span>
+                  <span><strong>Generate</strong> {{ formatDuration(metrics.generation_duration_ms) }}</span>
+                  <span><strong>Critic</strong> {{ formatDuration(metrics.critic_duration_ms) }}</span>
+                  <span><strong>Solver</strong> {{ formatDuration(metrics.solver_duration_ms) }}</span>
+                  <span><strong>Calls</strong> {{ metrics.model_calls || 0 }} total · {{ metrics.generation_calls || 0 }} generate · {{ metrics.critic_calls || 0 }} critic · {{ metrics.solver_calls || 0 }} solver</span>
+                  <span><strong>Retries / rejects / model failures</strong> {{ metrics.candidate_retries || 0 }} / {{ metrics.validation_rejections || 0 }} / {{ metrics.model_failures || 0 }}</span>
+                  <span><strong>Jev decisions / escalations</strong> {{ metrics.jev_decisions || 0 }} / {{ metrics.jev_review_escalations || 0 }}</span>
+                  <span><strong>Jev retrieval requests / expansions</strong> {{ metrics.jev_retrieval_requests || 0 }} / {{ metrics.jev_retrieval_expansions || 0 }}</span>
+                </div>
+              }
               <div class="generation-steps">
                 @for (event of run.logs || []; track event.timestamp + event.message) {
                   <div class="generation-step" [class.error]="event.level === 'error'">
-                    <div class="step-copy"><strong>{{ event.stage }}</strong><span>{{ event.message }}</span><small>{{ event.timestamp | date:'mediumTime' }}</small></div>
+                    <div class="step-copy"><strong>{{ event.stage }} @if (event.duration_ms !== undefined) { · {{ formatDuration(event.duration_ms) }} }</strong><span>{{ event.message }}</span><small>{{ event.timestamp | date:'mediumTime' }}</small></div>
                   </div>
                 } @empty { <p>No trace events were captured.</p> }
               </div>
             } @else { <p>Select a request to inspect its end-to-end trace.</p> }
           </div>
         </div>
+      </div>
+    }
+
+    @if (view() === 'Retrieval benchmark' && canRunRetrievalBenchmark()) {
+      <div class="view-container exam-mode-page animate-fade">
+        <div class="page-header exam-page-header">
+          <div>
+            <div class="header-badges-row"><span class="eyebrow-chip">RETRIEVAL QUALITY</span></div>
+            <h2>Retrieval Benchmark</h2>
+            <p>Compare ranked search results with labeled relevant chunks. Queries and labels are submitted to the evaluation endpoint.</p>
+          </div>
+        </div>
+
+        <section class="control-panel glass-card retrieval-benchmark-form">
+          <div class="card-header-bar">
+            <span class="card-title">Benchmark scope</span>
+            <span class="badge-accent">Faculty / Admin</span>
+          </div>
+          <p class="card-desc">At least one filter is required to bound each search to your selected corpus.</p>
+          <div class="retrieval-scope-grid">
+            <div class="form-group">
+              <label for="benchmark-subject-id">Subject ID</label>
+              <input id="benchmark-subject-id" class="form-input text-styled" [ngModel]="retrievalBenchmarkScope().subject_id" (ngModelChange)="updateRetrievalBenchmarkScope('subject_id', $event)" placeholder="subject-1">
+            </div>
+            <div class="form-group">
+              <label for="benchmark-material-id">Study material ID</label>
+              <input id="benchmark-material-id" class="form-input text-styled" [ngModel]="retrievalBenchmarkScope().study_material_id" (ngModelChange)="updateRetrievalBenchmarkScope('study_material_id', $event)" placeholder="Optional">
+            </div>
+            <div class="form-group">
+              <label for="benchmark-course-id">Course ID</label>
+              <input id="benchmark-course-id" class="form-input text-styled" [ngModel]="retrievalBenchmarkScope().course_id" (ngModelChange)="updateRetrievalBenchmarkScope('course_id', $event)" placeholder="Optional">
+            </div>
+            <div class="form-group">
+              <label for="benchmark-syllabus-id">Syllabus ID</label>
+              <input id="benchmark-syllabus-id" class="form-input text-styled" [ngModel]="retrievalBenchmarkScope().syllabus_id" (ngModelChange)="updateRetrievalBenchmarkScope('syllabus_id', $event)" placeholder="Optional">
+            </div>
+            <div class="form-group">
+              <label for="benchmark-topic-id">Topic ID</label>
+              <input id="benchmark-topic-id" class="form-input text-styled" [ngModel]="retrievalBenchmarkScope().topic_id" (ngModelChange)="updateRetrievalBenchmarkScope('topic_id', $event)" placeholder="Optional">
+            </div>
+            <div class="form-group">
+              <label for="benchmark-k">Rank cutoff (k)</label>
+              <input id="benchmark-k" type="number" min="1" max="20" class="form-input text-styled" [ngModel]="retrievalBenchmarkK()" (ngModelChange)="retrievalBenchmarkK.set(+$event)">
+            </div>
+          </div>
+
+          <div class="card-header-bar">
+            <span class="card-title">Labeled queries</span>
+            <span class="badge-accent">{{ retrievalBenchmarkCases().length }} / 20</span>
+          </div>
+          @for (benchmarkCase of retrievalBenchmarkCases(); track $index) {
+            <div class="retrieval-benchmark-case">
+              <div class="retrieval-benchmark-case-header">
+                <strong>Query {{ $index + 1 }}</strong>
+                <button class="btn-glass" type="button" (click)="removeRetrievalBenchmarkCase($index)" [disabled]="retrievalBenchmarkCases().length <= 1">Remove</button>
+              </div>
+              <div class="form-group">
+                <label [for]="'benchmark-query-' + $index">Search query</label>
+                <textarea [id]="'benchmark-query-' + $index" class="form-input textarea-styled" [ngModel]="benchmarkCase.query" (ngModelChange)="updateRetrievalBenchmarkCase($index, 'query', $event)" maxlength="2000" placeholder='Example: "binary tree traversal"'></textarea>
+              </div>
+              <div class="form-group">
+                <label [for]="'benchmark-relevant-' + $index">Relevant chunk IDs (comma-separated)</label>
+                <input [id]="'benchmark-relevant-' + $index" class="form-input text-styled" [ngModel]="benchmarkCase.relevantChunkIds" (ngModelChange)="updateRetrievalBenchmarkCase($index, 'relevantChunkIds', $event)" placeholder="chunk-id-1, chunk-id-2">
+              </div>
+            </div>
+          }
+          <div class="retrieval-benchmark-actions">
+            <button class="btn-glass" type="button" (click)="addRetrievalBenchmarkCase()" [disabled]="retrievalBenchmarkCases().length >= 20">Add query</button>
+            <button class="btn-primary" type="button" (click)="runRetrievalBenchmark()" [disabled]="retrievalBenchmarkLoading()">
+              {{ retrievalBenchmarkLoading() ? 'Running benchmark…' : 'Run benchmark' }}
+            </button>
+          </div>
+          <div class="retrieval-benchmark-json">
+            <div class="form-group">
+              <label for="retrieval-benchmark-json">Benchmark JSON (version 1)</label>
+              <textarea
+                id="retrieval-benchmark-json"
+                class="form-input textarea-styled retrieval-benchmark-json-input"
+                [ngModel]="retrievalBenchmarkJson()"
+                (ngModelChange)="retrievalBenchmarkJson.set($event)"
+                spellcheck="false"
+                placeholder='{"version":1,"k":5,"scope":{"subject_id":"subject-1"},"cases":[{"query":"binary tree traversal","relevant_chunk_ids":["chunk-123"]}]}'
+              ></textarea>
+            </div>
+            <div class="retrieval-benchmark-actions">
+              <button class="btn-glass" type="button" (click)="importRetrievalBenchmarkJson()">Load JSON</button>
+              <button class="btn-glass" type="button" (click)="exportRetrievalBenchmarkJson()">Export current setup</button>
+              <button class="btn-glass" type="button" (click)="downloadRetrievalBenchmarkJson()">Download JSON</button>
+            </div>
+            <small class="retrieval-benchmark-json-hint">Paste a version 1 dataset and load it, or export the current setup as copyable JSON.</small>
+          </div>
+          @if (retrievalBenchmarkError()) {
+            <div class="source-mode-banner"><strong>Benchmark could not run</strong><span>{{ retrievalBenchmarkError() }}</span></div>
+          }
+        </section>
+
+        @if (retrievalBenchmarkResult(); as result) {
+          <section class="control-panel glass-card retrieval-benchmark-results" aria-live="polite">
+            <div class="card-header-bar">
+              <span class="card-title">Aggregate results</span>
+              <span class="badge-accent">{{ result.strategy }} · {{ result.query_count }} queries · k={{ result.k }}</span>
+            </div>
+            <div class="retrieval-metric-grid">
+              <div class="metric-card"><span class="metric-label">Precision@{{ result.k }}</span><span class="metric-value">{{ retrievalBenchmarkMetric('precision') }}</span></div>
+              <div class="metric-card"><span class="metric-label">Recall@{{ result.k }}</span><span class="metric-value">{{ retrievalBenchmarkMetric('recall') }}</span></div>
+              <div class="metric-card"><span class="metric-label">MRR@{{ result.k }}</span><span class="metric-value">{{ retrievalBenchmarkMetric('mrr') }}</span></div>
+              <div class="metric-card"><span class="metric-label">nDCG@{{ result.k }}</span><span class="metric-value">{{ retrievalBenchmarkMetric('ndcg') }}</span></div>
+            </div>
+            <div class="retrieval-benchmark-query-results">
+              @for (queryResult of result.per_query; track $index) {
+                <article class="retrieval-benchmark-query-result">
+                  <h3>{{ queryResult.query }}</h3>
+                  <div class="generation-metrics">
+                    <span><strong>Precision</strong> {{ retrievalBenchmarkQueryMetric(queryResult, 'precision', result.k) }}</span>
+                    <span><strong>Recall</strong> {{ retrievalBenchmarkQueryMetric(queryResult, 'recall', result.k) }}</span>
+                    <span><strong>MRR</strong> {{ retrievalBenchmarkQueryMetric(queryResult, 'mrr', result.k) }}</span>
+                    <span><strong>nDCG</strong> {{ retrievalBenchmarkQueryMetric(queryResult, 'ndcg', result.k) }}</span>
+                  </div>
+                  <p><strong>Relevant IDs:</strong> {{ queryResult.relevant_chunk_ids.join(', ') }}</p>
+                  <p><strong>Retrieved IDs:</strong> {{ queryResult.retrieved_chunk_ids.join(', ') || 'No matches' }}</p>
+                </article>
+              }
+            </div>
+          </section>
+        }
       </div>
     }
 
@@ -338,7 +486,7 @@
               <div class="source-mode-icon">🌐</div>
               <div class="source-mode-text">
                 <strong>Open-domain knowledge enabled</strong>
-                <span>Generate questions from a topic, concept, or syllabus without uploading a document.</span>
+                <span>When indexed material has no match, your topic is sent to web search and questions use cited search results. Add TAVILY_API_KEY to enable this fallback.</span>
               </div>
             </div>
 
@@ -390,6 +538,15 @@
               </div>
 
               <div class="form-group">
+                <label for="validation-mode">VALIDATION RIGOR</label>
+                <select id="validation-mode" class="form-input select-styled" [ngModel]="validationMode()" (ngModelChange)="validationMode.set($event)">
+                  <option value="fast">Fast practice — local checks with one repair retry</option>
+                  <option value="strict">Strict assessment — hosted critic and solver</option>
+                </select>
+                <small>Fast mode skips hosted review for low-risk questions and allows one repair retry; high-risk questions are escalated. Exam papers default to strict review; selective review is available in the paper configuration.</small>
+              </div>
+
+              <div class="form-group">
                 <label>BLOOM'S TAXONOMY</label>
                 <select class="form-input select-styled" [ngModel]="bloom()" (ngModelChange)="bloom.set($event)">
                   <option value="Remember">Level 1: Remember</option>
@@ -433,28 +590,32 @@
                   <h3>Generation Pipeline</h3>
                   <p>{{ generating() ? (generatingStep() || 'AI is analyzing the requested competitive-exam scope.') : 'Ready to analyze your topic and create calibrated questions.' }}</p>
                 </div>
-                <span class="pipeline-live-status" [class.running]="generating()">{{ generating() ? 'Generating' : 'Ready' }}</span>
+                <span class="pipeline-live-status" [class.running]="generating()">{{ generating() ? 'Generating' : (liveGenerationRun()?.status === 'completed' ? 'Complete' : liveGenerationRun()?.status === 'failed' ? 'Failed' : 'Ready') }}</span>
               </div>
-              <div class="pipeline-stepper compact">
-                <div class="pipeline-step" [class.is-complete]="generating()" [class.is-active]="generating()">
-                  <span class="pipeline-node"><span>1</span></span>
-                  <strong>Analyze topic</strong><small>Understand concepts and scope</small>
-                </div>
-                <div class="pipeline-connector"></div>
-                <div class="pipeline-step" [class.is-active]="generating()">
-                  <span class="pipeline-node"><span>2</span></span>
-                  <strong>Plan questions</strong><small>Apply pattern and Bloom level</small>
-                </div>
-                <div class="pipeline-connector"></div>
-                <div class="pipeline-step" [class.is-active]="generating()">
-                  <span class="pipeline-node"><span>3</span></span>
-                  <strong>Validate</strong><small>Check quality and distractors</small>
-                </div>
+              <div class="pipeline-stepper six-step-pipeline" aria-label="Generation stages">
+                @for (step of pipelineSteps('competitive'); track $index) {
+                  <div class="pipeline-step" [class.is-complete]="step.state === 'complete'" [class.is-active]="step.state === 'active'" [class.is-error]="step.state === 'error'">
+                    <span class="pipeline-node"><span>{{ step.state === 'complete' ? '✓' : step.state === 'error' ? '!' : $index + 1 }}</span></span>
+                    <strong>{{ step.title }}</strong><small>{{ step.detail }}</small>
+                  </div>
+                  @if (!$last) { <div class="pipeline-connector" [class.is-complete]="step.state === 'complete'"></div> }
+                }
               </div>
               <div class="pipeline-progress-row">
-                <div class="pipeline-progress"><span [class.running]="generating()"></span></div>
-                <strong>{{ generating() ? 'Working...' : 'Awaiting request' }}</strong>
+                <div class="pipeline-progress"><span [style.width.%]="questionProgressPercent()"></span></div>
+                <strong>{{ liveGenerationRun() ? questionProgressPercent() + '% validated' : 'Awaiting request' }}</strong>
               </div>
+
+            @if (liveGenerationRun()) {
+              <div class="question-progress-list" aria-live="polite">
+                <p>{{ validatedQuestionCount() }} / {{ questionProgress().length }} questions ready &middot; {{ questionProgressPercent() }}% validated &middot; Elapsed {{ formatDuration(generationElapsedMs()) }} &middot; {{ liveGenerationRun()?.status }}</p>
+                @for (question of questionProgress(); track question.index) {
+                  <div class="question-progress-item" [class.complete]="question.state === 'Validated'" [class.failed]="question.state === 'Failed'">
+                    <strong>Q{{ question.index }}</strong><span>{{ question.state }}</span><small>{{ question.message }} @if (question.retries) { &middot; {{ question.retries }} retries } @if (question.elapsedMs) { &middot; {{ formatDuration(question.elapsedMs) }} }</small>
+                  </div>
+                }
+              </div>
+            }
               <div class="pipeline-callout">
                 <span class="pipeline-callout-icon">AI</span>
                 <div><strong>Competitive-exam ready</strong><p>Questions are calibrated for the selected pattern, difficulty, and Bloom&apos;s level.</p></div>
@@ -468,6 +629,11 @@
                 </div>
                 <h3>AI Synthesis in Progress</h3>
                 <p class="loader-status">{{ generatingStep() || 'Retrieving indexed material, generating stems, and validating distractors...' }}</p>
+                <div class="generation-live-details" aria-live="polite">
+                  <span><strong>Elapsed</strong>{{ formatDuration(generationElapsedMs()) }}</span>
+                  <span><strong>Stage</strong>{{ liveGenerationRun()?.stage || 'queued' }}</span>
+                  <span class="generation-live-route"><strong>Model route</strong>{{ liveGenerationRoute() }}</span>
+                </div>
                 <div class="pipeline-tags">
                   <span class="active">1. Context Retrieval</span>
                   <span class="active">2. Stem Synthesis</span>
@@ -552,7 +718,11 @@
                         @if (q.sources && q.sources[0]) {
                           <div class="source-citation">
                             <span class="source-tag">Source Grounding:</span>
-                            <span>{{ q.sources[0].text?.slice(0, 180) }}... (Page {{ q.sources[0].page_number || 1 }})</span>
+                            @if (q.sources[0].url) {
+                              <a [href]="q.sources[0].url" target="_blank" rel="noopener noreferrer">{{ q.sources[0].title || q.sources[0].url }}</a>
+                            } @else {
+                              <span>{{ q.sources[0].text?.slice(0, 180) }}... (Page {{ q.sources[0].page_number || 1 }})</span>
+                            }
                           </div>
                         }
                       </div>
@@ -690,14 +860,19 @@
 
                     <div class="form-group section-format-group">
                       <label [for]="'new-pattern-style-' + $index">PATTERN FORMAT & GUIDELINES</label>
-                      <input
+                      <select
                         [id]="'new-pattern-style-' + $index"
-                        type="text"
-                        class="form-input text-styled"
+                        class="form-input select-styled"
                         [ngModel]="section.pattern"
                         (ngModelChange)="updatePatternSectionText($index, 'pattern', $event)"
-                        placeholder="e.g. Paired statement with causal verification and 4 standard choices"
-                      />
+                      >
+                        @for (format of patternFormats; track format) {
+                          <option [value]="format">{{ format }}</option>
+                        }
+                        @if (section.pattern && !patternFormats.includes(section.pattern)) {
+                          <option [value]="section.pattern">{{ section.pattern }}</option>
+                        }
+                      </select>
                     </div>
 
                     <div class="section-marks-summary">
@@ -707,20 +882,28 @@
 
                     <div class="section-taxonomy-grid">
                       <div class="form-group">
-                        <label>SECTION DIFFICULTY LEVELS</label>
-                        <div class="pill-selection-grid compact-pills">
+                        <label [for]="'section-difficulty-' + $index">SECTION DIFFICULTY LEVELS</label>
+                        <select [id]="'section-difficulty-' + $index" class="form-input select-styled" [ngModel]="section.supported_difficulties?.join(',')" (ngModelChange)="setPatternSectionLevels($index, 'supported_difficulties', $event)">
+                          <option value="Easy,Medium,Hard">All difficulty levels</option>
                           @for (diff of ['Easy', 'Medium', 'Hard']; track diff) {
-                            <button type="button" class="selection-pill" [class.selected]="section.supported_difficulties?.includes(diff)" (click)="togglePatternSectionDifficulty($index, diff)">{{ diff }}</button>
+                            <option [value]="diff">{{ diff }}</option>
                           }
-                        </div>
+                          @if ((section.supported_difficulties?.length || 0) > 1 && section.supported_difficulties?.join(',') !== 'Easy,Medium,Hard') {
+                            <option [value]="section.supported_difficulties?.join(',')">{{ section.supported_difficulties?.join(', ') }}</option>
+                          }
+                        </select>
                       </div>
                       <div class="form-group">
-                        <label>SECTION BLOOM'S TAXONOMY LEVELS</label>
-                        <div class="pill-selection-grid compact-pills">
+                        <label [for]="'section-bloom-' + $index">SECTION BLOOM'S TAXONOMY LEVELS</label>
+                        <select [id]="'section-bloom-' + $index" class="form-input select-styled" [ngModel]="section.supported_bloom_levels?.join(',')" (ngModelChange)="setPatternSectionLevels($index, 'supported_bloom_levels', $event)">
+                          <option value="Remember,Understand,Apply,Analyze,Evaluate,Create">All Bloom's taxonomy levels</option>
                           @for (level of ['Remember', 'Understand', 'Apply', 'Analyze', 'Evaluate', 'Create']; track level) {
-                            <button type="button" class="selection-pill" [class.selected]="section.supported_bloom_levels?.includes(level)" (click)="togglePatternSectionBloom($index, level)">{{ level }}</button>
+                            <option [value]="level">{{ level }}</option>
                           }
-                        </div>
+                          @if ((section.supported_bloom_levels?.length || 0) > 1 && section.supported_bloom_levels?.join(',') !== 'Remember,Understand,Apply,Analyze,Evaluate,Create') {
+                            <option [value]="section.supported_bloom_levels?.join(',')">{{ section.supported_bloom_levels?.join(', ') }}</option>
+                          }
+                        </select>
                       </div>
                     </div>
                   </div>
@@ -901,61 +1084,13 @@
                 </div>
               </div>
             </div>
-          </div>
-
-          <!-- Step 2: Pattern and generation -->
-          <div class="glass-card config-card paper-pipeline-card">
-            <div class="card-step-badge">Step 2</div>
-            <h3>Generation Pipeline</h3>
-            <p class="card-desc">AI processes the document, generates questions, and validates every item before review.</p>
-
-            <div class="pipeline-stepper normal-pipeline" aria-live="polite">
-              <div class="pipeline-step" [class.is-complete]="generationTimeline()[0]?.state === 'complete'" [class.is-active]="generationTimeline()[0]?.state === 'active'">
-                <span class="pipeline-node"><span>1</span></span><strong>Parse document</strong><small>Extract text from your PDF</small>
-              </div>
-              <div class="pipeline-connector"></div>
-              <div class="pipeline-step" [class.is-complete]="generationTimeline()[1]?.state === 'complete'" [class.is-active]="generationTimeline()[1]?.state === 'active'">
-                <span class="pipeline-node"><span>2</span></span><strong>Clean content</strong><small>Remove noise and organize topics</small>
-              </div>
-              <div class="pipeline-connector"></div>
-              <div class="pipeline-step" [class.is-complete]="generationTimeline()[2]?.state === 'complete'" [class.is-active]="generationTimeline()[2]?.state === 'active'">
-                <span class="pipeline-node"><span>3</span></span><strong>Build context</strong><small>Create grounded retrieval chunks</small>
-              </div>
-              <div class="pipeline-connector"></div>
-              <div class="pipeline-step" [class.is-complete]="generationTimeline()[3]?.state === 'complete'" [class.is-active]="generationTimeline()[3]?.state === 'active'">
-                <span class="pipeline-node"><span>4</span></span><strong>Generate</strong><small>Apply your selected pattern</small>
-              </div>
-              <div class="pipeline-connector"></div>
-              <div class="pipeline-step" [class.is-complete]="generationTimeline()[4]?.state === 'complete'" [class.is-active]="generationTimeline()[4]?.state === 'active'">
-                <span class="pipeline-node"><span>5</span></span><strong>Validate</strong><small>Check quality and duplicates</small>
-              </div>
-            </div>
-
-            <div class="pipeline-progress-row">
-              <div class="pipeline-progress"><span [class.running]="materialProcessing()"></span></div>
-              <strong>{{ materialProcessing() ? 'Generating...' : 'Ready to generate' }}</strong>
-            </div>
-
-            <div class="pipeline-callout normal-callout">
-              <span class="pipeline-callout-icon">AI</span>
-              <div><strong>Grounded question generation</strong><p>Questions stay tied to your uploaded material and the selected blueprint.</p></div>
-            </div>
-
             <div class="form-group">
-              <label for="paper-template">BLUEPRINT TEMPLATE</label>
-              <select
-                id="paper-template"
-                class="form-input select-styled"
-                [ngModel]="templateId()"
-                (ngModelChange)="setTemplateId($event)"
-              >
-                @for (tpl of templates(); track tpl.id) {
-                  <option [value]="tpl.id">{{ tpl.name }} ({{ tpl.total_marks || tpl.marks || 1 }} Marks)</option>
-                }
-                @if (templates().length === 0) {
-                  <option value="standard">Standard Examination Paper Blueprint</option>
-                }
+              <label for="paper-validation-mode">Review mode</label>
+              <select id="paper-validation-mode" class="form-input select-styled" [disabled]="materialProcessing()" [ngModel]="paperValidationMode()" (ngModelChange)="paperValidationMode.set($event)">
+                <option value="strict">Strict - review every question</option>
+                <option value="fast">Faster - selective hosted review</option>
               </select>
+              <small>Faster mode keeps local validation and hosted review for high-risk or weakly supported questions.</small>
             </div>
 
             <div class="blueprint-summary-box">
@@ -982,6 +1117,44 @@
                 <span>Upload & Generate Question Paper →</span>
               }
             </button>
+          </div>
+
+          <!-- Step 2: Pattern and generation -->
+          <div class="glass-card config-card paper-pipeline-card">
+            <div class="card-step-badge">Step 2</div>
+            <h3>Generation Pipeline</h3>
+            <p class="card-desc">AI processes the document, generates questions, and validates every item before review.</p>
+
+            <div class="pipeline-stepper six-step-pipeline" aria-label="Generation stages">
+                @for (step of pipelineSteps('normal'); track $index) {
+                  <div class="pipeline-step" [class.is-complete]="step.state === 'complete'" [class.is-active]="step.state === 'active'" [class.is-error]="step.state === 'error'">
+                    <span class="pipeline-node"><span>{{ step.state === 'complete' ? '✓' : step.state === 'error' ? '!' : $index + 1 }}</span></span>
+                    <strong>{{ step.title }}</strong><small>{{ step.detail }}</small>
+                  </div>
+                  @if (!$last) { <div class="pipeline-connector" [class.is-complete]="step.state === 'complete'"></div> }
+                }
+              </div>
+              <div class="pipeline-progress-row">
+              <div class="pipeline-progress"><span [style.width.%]="questionProgressPercent()"></span></div>
+              <strong>{{ liveGenerationRun() ? questionProgressPercent() + '% validated' : (materialProcessing() ? 'Preparing material...' : 'Ready to generate') }}</strong>
+            </div>
+
+
+            @if (liveGenerationRun()) {
+              <div class="question-progress-list" aria-live="polite">
+                <p>{{ validatedQuestionCount() }} / {{ questionProgress().length }} questions ready &middot; {{ questionProgressPercent() }}% validated &middot; Elapsed {{ formatDuration(generationElapsedMs()) }} &middot; {{ liveGenerationRun()?.status }}</p>
+                @for (question of questionProgress(); track question.index) {
+                  <div class="question-progress-item" [class.complete]="question.state === 'Validated'" [class.failed]="question.state === 'Failed'">
+                    <strong>Q{{ question.index }}</strong><span>{{ question.state }}</span><small>{{ question.message }} @if (question.retries) { &middot; {{ question.retries }} retries } @if (question.elapsedMs) { &middot; {{ formatDuration(question.elapsedMs) }} }</small>
+                  </div>
+                }
+              </div>
+            }
+            <div class="pipeline-callout normal-callout">
+              <span class="pipeline-callout-icon">AI</span>
+              <div><strong>Grounded question generation</strong><p>Questions stay tied to your uploaded material and the selected blueprint.</p></div>
+            </div>
+
           </div>
         </div>
         @if (generationTimeline().length) {
@@ -1232,6 +1405,12 @@
 
         @if (libraryLoading()) {
           <div class="empty-state-panel glass-card"><p>Loading previously created question papers…</p></div>
+        } @else if (libraryError()) {
+          <div class="empty-state-panel glass-card">
+            <h3>Could not load your library</h3>
+            <p>{{ libraryError() }}</p>
+            <button class="btn-primary-gradient" (click)="loadLibraryPapers()">Retry</button>
+          </div>
         } @else if (libraryPapers().length) {
           <div class="library-paper-grid">
             @for (paper of libraryPapers(); track paper.id) {
@@ -1346,10 +1525,14 @@
 
       <div class="modal-header">
         <div class="modal-icon-badge">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></svg>
+          @if (authMode() === 'login') {
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></svg>
+          } @else {
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="10" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></svg>
+          }
         </div>
-        <h3 id="login-title">Welcome back.</h3>
-        <p>Sign in to access your assessment studio and generation models.</p>
+        <h3 id="login-title">{{ authMode() === 'login' ? 'Welcome back.' : 'Create your account.' }}</h3>
+        <p>{{ authMode() === 'login' ? 'Sign in to access your assessment studio and generation models.' : 'Register with your email to join the assessment studio.' }}</p>
       </div>
 
       @if (loginMessage()) {
@@ -1358,7 +1541,23 @@
         </div>
       }
 
-      <form (ngSubmit)="login()">
+      <form (ngSubmit)="submitAuth()">
+        @if (authMode() === 'register') {
+          <div class="form-group">
+            <label for="register-role">ACCOUNT TYPE</label>
+            <select
+              id="register-role"
+              class="form-input select-styled"
+              [ngModel]="registerRole()"
+              (ngModelChange)="registerRole.set($event)"
+              name="role"
+            >
+              <option value="student">Student</option>
+              <option value="faculty">Faculty</option>
+            </select>
+          </div>
+        }
+
         <div class="form-group">
           <label for="login-email">EMAIL ADDRESS</label>
           <input
@@ -1368,6 +1567,8 @@
             [ngModel]="loginEmail()"
             (ngModelChange)="loginEmail.set($event)"
             name="email"
+            autocomplete="email"
+            required
             placeholder="e.g. faculty@example.edu"
           />
         </div>
@@ -1381,6 +1582,9 @@
             [ngModel]="loginPassword()"
             (ngModelChange)="loginPassword.set($event)"
             name="password"
+            [attr.autocomplete]="authMode() === 'register' ? 'new-password' : 'current-password'"
+            [attr.minlength]="authMode() === 'register' ? 8 : null"
+            required
             placeholder="••••••••"
           />
         </div>
@@ -1392,12 +1596,21 @@
         >
           @if (loginState() === 'submitting') {
             <span class="spinner-small"></span>
-            <span>Signing In...</span>
+            <span>{{ authMode() === 'register' ? 'Creating Account...' : 'Signing In...' }}</span>
           } @else {
-            <span>Sign In to Studio →</span>
+            <span>{{ authMode() === 'register' ? 'Create Account →' : 'Sign In to Studio →' }}</span>
           }
         </button>
       </form>
+
+      <button
+        type="button"
+        class="btn-glass full-width"
+        (click)="switchAuthMode(authMode() === 'login' ? 'register' : 'login')"
+        [disabled]="loginState() === 'submitting'"
+      >
+        {{ authMode() === 'login' ? 'New here? Create an account' : 'Already registered? Sign in' }}
+      </button>
     </div>
   </div>
 }

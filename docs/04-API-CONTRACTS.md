@@ -25,12 +25,28 @@ GET /materials/{id}/status
 
 POST /retrieval/materials/{id}/index
 POST /retrieval/search
+POST /retrieval/evaluate
+POST /retrieval/vector-index
+GET /retrieval/vector-index
+
+Retrieval remains local lexical BM25/keyword ranking unless both
+`RETRIEVAL_EMBEDDING_API_BASE_URL` and `RETRIEVAL_EMBEDDING_API_KEY` are
+configured together with the model name and output dimensions. Semantic mode
+calls the configured OpenAI-compatible `/embeddings` endpoint over HTTPS for
+remote hosts and uses MongoDB Atlas Vector Search before BM25/phrase reranking.
+Chunk text and search queries are sent to that configured embedding provider.
+`RETRIEVAL_EMBEDDING_TIMEOUT_SECONDS` sets the provider request timeout.
+In semantic mode, create the Atlas index with `POST /retrieval/vector-index`,
+poll `GET /retrieval/vector-index` until `queryable` is true, then re-index
+processed materials. The vector index must use the configured dimension count,
+cosine similarity, and the academic-scope and `embedding_model` filter fields.
 
 GET /templates
 POST /templates
 PUT /templates/{id}
 
 POST /questions/generate
+POST /questions/generate/start
 POST /questions/generate/batch
 POST /questions/generate/paper
 POST /questions
@@ -38,6 +54,31 @@ GET /questions/review
 POST /questions/{id}/validate
 POST /questions/{id}/approve
 POST /questions/{id}/reject
+
+`POST /questions/generate` accepts `validation_mode: "fast" | "strict"` and
+defaults to `"strict"`. Both modes run local schema and quality validation;
+`"fast"` normally skips hosted critic and independent-solver checks for one
+question, but Jev escalates locally valid high-risk or low-evidence questions
+to those checks. Strict mode and question-paper generation always retain
+hosted review. The `jev_decision` event in generation-run logs records the
+evidence-confidence routing score and escalation reason; this score is not a
+probability of correctness. The interactive single-question practice generator
+defaults to fast mode and allows two candidate attempts total (one repair retry);
+strict API requests allow up to five candidate attempts. Each candidate retains
+one retry for malformed structured model output. The paper-generation endpoint
+keeps its strict review and existing retry budget.
+
+`POST /questions/generate/start` accepts the same request and returns a
+generation-run snapshot immediately. Poll `GET /questions/generate/runs/{run_id}`
+for live stage, trace, metrics, result, or failure details. The existing
+`POST /questions/generate` remains synchronous for API clients that need that
+contract.
+
+An optional local stdio MCP server exposes `search_materials`,
+`generate_question`, and `get_generation_run` as tools backed by the retrieval
+and generation endpoints above. It forwards a bearer token and does not bypass
+API authentication, role checks, quotas, or run ownership. See
+`docs/05-AI-RAG.md` for client configuration and token handling.
 
 GET /question-bank
 POST /question-bank
@@ -61,6 +102,49 @@ POST /evaluation/research
 GET /users
 POST /users
 PATCH /users/{id}/status
+
+## Retrieval benchmark
+
+`POST /retrieval/evaluate` is restricted to faculty and administrators. It
+accepts 1–20 labeled queries, returns macro and per-query Precision@k,
+Recall@k, MRR@k, and nDCG@k, and includes the retrieved and labeled chunk IDs
+for inspection. `k` is limited to 1–20 and each query may label up to 50
+relevant chunks. Supply at least one scope filter (`subject_id`,
+`study_material_id`, `course_id`, `syllabus_id`, or `topic_id`) to limit the
+search corpus.
+
+```json
+{
+  "cases": [
+    {
+      "query": "binary tree traversal",
+      "relevant_chunk_ids": ["chunk-123", "chunk-456"]
+    }
+  ],
+  "k": 5,
+  "subject_id": "subject-1"
+}
+```
+
+Retrieval queries ignore common English stop words (negations such as `not`
+are retained). Wrap an exact phrase in double quotes to boost chunks containing
+that phrase in the same token order, for example `"binary tree traversal"`.
+The faculty/admin benchmark screen imports and exports reusable version 1
+datasets in this format:
+
+```json
+{
+  "version": 1,
+  "k": 5,
+  "scope": { "subject_id": "subject-1" },
+  "cases": [
+    {
+      "query": "binary tree traversal",
+      "relevant_chunk_ids": ["chunk-123", "chunk-456"]
+    }
+  ]
+}
+```
 
 All endpoints require request validation, RBAC where applicable, consistent
 error responses and request/correlation IDs. Upload processing uses the

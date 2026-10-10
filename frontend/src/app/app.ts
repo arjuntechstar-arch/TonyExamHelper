@@ -1,6 +1,6 @@
-import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { DatePipe } from '@angular/common';
-import { Component, inject, signal } from '@angular/core';
+import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
+import { Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { firstValueFrom } from 'rxjs';
 
@@ -11,6 +11,7 @@ export type View =
   | 'Question paper'
   | 'Generated questions'
   | 'Monitoring'
+  | 'Retrieval benchmark'
   | 'Practice'
   | 'Library'
   | 'Profile';
@@ -88,13 +89,47 @@ interface GenerationRun {
   logs?: GenerationTraceEvent[];
   result?: Question[];
   error?: string;
+  metrics?: GenerationMetrics;
 }
 
 interface GenerationTraceEvent {
   timestamp: string;
   stage: string;
-  level: 'info' | 'error';
+  level: 'info' | 'warning' | 'error';
   message: string;
+  duration_ms?: number;
+  details?: {
+    question_index?: number;
+    question_total?: number;
+    decision?: {
+      action: 'accept_locally' | 'retrieve_more_evidence' | 'review_with_hosted_checks';
+      evidence_confidence: number;
+      review_required: boolean;
+      reasons: string[];
+    };
+  };
+}
+
+interface GenerationMetrics {
+  total_duration_ms?: number;
+  retrieval_duration_ms?: number;
+  web_search_duration_ms?: number;
+  model_duration_ms?: number;
+  generation_duration_ms?: number;
+  critic_duration_ms?: number;
+  solver_duration_ms?: number;
+  model_calls?: number;
+  generation_calls?: number;
+  critic_calls?: number;
+  solver_calls?: number;
+  candidate_retries?: number;
+  validation_rejections?: number;
+  model_failures?: number;
+  jev_decisions?: number;
+  jev_retrieval_requests?: number;
+  jev_retrieval_expansions?: number;
+  jev_review_escalations?: number;
+  jev_evidence_confidence_total?: number;
 }
 
 interface GenerationTimelineStep {
@@ -117,6 +152,8 @@ export interface QuestionSource {
   chunk_id?: string;
   page_number?: number;
   text?: string;
+  title?: string;
+  url?: string;
 }
 
 export interface Question {
@@ -206,6 +243,40 @@ export const DEFAULT_TEMPLATES: Template[] = [
   },
 ];
 
+interface RetrievalBenchmarkCaseDraft {
+  query: string;
+  relevantChunkIds: string;
+}
+
+interface RetrievalBenchmarkQueryResult {
+  query: string;
+  retrieved_chunk_ids: string[];
+  relevant_chunk_ids: string[];
+  [metric: string]: string | string[] | number;
+}
+
+interface RetrievalBenchmarkResult {
+  strategy: string;
+  scope: Record<string, string>;
+  query_count: number;
+  k: number;
+  metrics: Record<string, number>;
+  per_query: RetrievalBenchmarkQueryResult[];
+}
+
+type RetrievalBenchmarkScopeField =
+  | 'subject_id'
+  | 'study_material_id'
+  | 'course_id'
+  | 'syllabus_id'
+  | 'topic_id';
+
+interface RetrievalBenchmarkPayload {
+  cases: { query: string; relevant_chunk_ids: string[] }[];
+  k: number;
+  scope: Partial<Record<RetrievalBenchmarkScopeField, string>>;
+}
+
 @Component({
   selector: 'app-root',
   standalone: true,
@@ -230,8 +301,10 @@ export class App {
   public readonly currentUser = signal<User | null>(null);
   public readonly user = this.currentUser;
   public readonly loginOpen = signal<boolean>(false);
+  public readonly authMode = signal<'login' | 'register'>('login');
   public readonly loginEmail = signal<string>('');
   public readonly loginPassword = signal<string>('');
+  public readonly registerRole = signal<'student' | 'faculty'>('student');
   public readonly loginState = signal<'ready' | 'submitting'>('ready');
   public readonly loginMessage = signal<string>('');
 
@@ -261,8 +334,25 @@ export class App {
   public readonly generationRuns = signal<GenerationRun[]>([]);
   public readonly selectedGenerationRun = signal<GenerationRun | null>(null);
   public readonly generationRunsLoading = signal<boolean>(false);
+  public readonly retrievalBenchmarkCases = signal<RetrievalBenchmarkCaseDraft[]>([
+    { query: '', relevantChunkIds: '' },
+  ]);
+  public readonly retrievalBenchmarkK = signal<number>(5);
+  public readonly retrievalBenchmarkScope = signal({
+    subject_id: '',
+    study_material_id: '',
+    course_id: '',
+    syllabus_id: '',
+    topic_id: '',
+  });
+  public readonly retrievalBenchmarkLoading = signal<boolean>(false);
+  public readonly retrievalBenchmarkError = signal<string>('');
+  public readonly retrievalBenchmarkJson = signal<string>('');
+  public readonly retrievalBenchmarkResult = signal<RetrievalBenchmarkResult | null>(null);
+  public readonly libraryError = signal<string>('');
   public readonly libraryPapers = signal<GenerationRun[]>([]);
   public readonly libraryLoading = signal<boolean>(false);
+  private generationRunsLoadedAt = 0;
 
   // Templates & Pattern Management
   public readonly templates = signal<Template[]>(DEFAULT_TEMPLATES);
@@ -272,10 +362,14 @@ export class App {
   public readonly query = signal<string>('');
   public readonly difficulty = signal<string>('Medium');
   public readonly bloom = signal<string>('Understand');
+  public readonly validationMode = signal<'fast' | 'strict'>('fast');
+  public readonly paperValidationMode = signal<'fast' | 'strict'>('strict');
   public readonly count = signal<number>(1);
   public readonly allowWebKnowledge = signal<boolean>(true);
   public readonly generating = signal<boolean>(false);
   public readonly generatingStep = signal<string>('');
+  public readonly liveGenerationRun = signal<GenerationRun | null>(null);
+  public readonly generationElapsedMs = signal<number>(0);
   public readonly questions = signal<Question[]>([]);
   public readonly revealedAnswers = signal<Record<number, boolean>>({});
 
@@ -532,6 +626,10 @@ export class App {
   }
 
   public navigate(v: View): void {
+    if (v === 'Retrieval benchmark' && !this.canRunRetrievalBenchmark()) {
+      this.setToast('Retrieval benchmarks are available to faculty and administrators.', 'warning');
+      return;
+    }
     this.activeView.set(v);
     this.notice.set('');
     if (v === 'Dashboard') {
@@ -550,34 +648,295 @@ export class App {
     }
   }
 
+  public canRunRetrievalBenchmark(): boolean {
+    return this.currentUser()?.roles.some((role) => role === 'faculty' || role === 'admin') ?? false;
+  }
+
+  public addRetrievalBenchmarkCase(): void {
+    if (this.retrievalBenchmarkCases().length >= 20) return;
+    this.retrievalBenchmarkCases.update((cases) => [
+      ...cases,
+      { query: '', relevantChunkIds: '' },
+    ]);
+  }
+
+  public removeRetrievalBenchmarkCase(index: number): void {
+    if (this.retrievalBenchmarkCases().length <= 1) return;
+    this.retrievalBenchmarkCases.update((cases) => cases.filter((_, caseIndex) => caseIndex !== index));
+  }
+
+  public updateRetrievalBenchmarkCase(
+    index: number,
+    field: keyof RetrievalBenchmarkCaseDraft,
+    value: string,
+  ): void {
+    this.retrievalBenchmarkCases.update((cases) =>
+      cases.map((item, caseIndex) => caseIndex === index ? { ...item, [field]: value } : item),
+    );
+  }
+
+  public retrievalBenchmarkMetric(metric: string): string {
+    const result = this.retrievalBenchmarkResult();
+    const value = result?.metrics[`${metric}@${result.k}`];
+    return value === undefined ? '—' : value.toFixed(3);
+  }
+
+  public updateRetrievalBenchmarkScope(field: RetrievalBenchmarkScopeField, value: string): void {
+    this.retrievalBenchmarkScope.update((scope) => ({ ...scope, [field]: value }));
+  }
+
+  public retrievalBenchmarkQueryMetric(
+    query: RetrievalBenchmarkQueryResult,
+    metric: string,
+    k: number,
+  ): string {
+    const value = query[`${metric}@${k}`];
+    return typeof value === 'number' ? value.toFixed(3) : '—';
+  }
+
+  private buildRetrievalBenchmarkPayload(): RetrievalBenchmarkPayload | null {
+    const k = this.retrievalBenchmarkK();
+    if (!Number.isInteger(k) || k < 1 || k > 20) {
+      this.retrievalBenchmarkError.set('Rank cutoff must be a whole number between 1 and 20.');
+      return null;
+    }
+    const scope = Object.fromEntries(
+      Object.entries(this.retrievalBenchmarkScope())
+        .map(([key, value]) => [key, value.trim()])
+        .filter(([, value]) => Boolean(value)),
+    ) as Partial<Record<RetrievalBenchmarkScopeField, string>>;
+    if (Object.keys(scope).length === 0) {
+      this.retrievalBenchmarkError.set('Provide at least one scope filter to limit the search corpus.');
+      return null;
+    }
+    const drafts = this.retrievalBenchmarkCases();
+    if (drafts.length < 1 || drafts.length > 20) {
+      this.retrievalBenchmarkError.set('A benchmark must contain between 1 and 20 queries.');
+      return null;
+    }
+    const cases = drafts.map((item) => ({
+      query: item.query.trim(),
+      relevant_chunk_ids: [...new Set(item.relevantChunkIds.split(',').map((id) => id.trim()).filter(Boolean))],
+    }));
+    if (cases.some((item) => !item.query || item.query.length > 2_000 || item.relevant_chunk_ids.length === 0 || item.relevant_chunk_ids.length > 50)) {
+      this.retrievalBenchmarkError.set('Each query must be at most 2,000 characters and have between 1 and 50 relevant chunk IDs.');
+      return null;
+    }
+    return { cases, k, scope };
+  }
+
+  public exportRetrievalBenchmarkJson(): void {
+    const payload = this.buildRetrievalBenchmarkPayload();
+    if (!payload) return;
+    this.retrievalBenchmarkJson.set(this.formatRetrievalBenchmarkJson(payload));
+    this.retrievalBenchmarkError.set('');
+  }
+
+  public downloadRetrievalBenchmarkJson(): void {
+    const payload = this.buildRetrievalBenchmarkPayload();
+    if (!payload) return;
+    const json = this.formatRetrievalBenchmarkJson(payload);
+    this.retrievalBenchmarkJson.set(json);
+    this.retrievalBenchmarkError.set('');
+
+    const blob = new Blob([json], { type: 'application/json' });
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = 'retrieval-benchmark.json';
+    document.body.appendChild(link);
+    try {
+      link.click();
+    } finally {
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  private formatRetrievalBenchmarkJson(payload: RetrievalBenchmarkPayload): string {
+    return JSON.stringify({
+      version: 1,
+      ...payload,
+    }, null, 2);
+  }
+
+  public importRetrievalBenchmarkJson(): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(this.retrievalBenchmarkJson());
+    } catch {
+      this.retrievalBenchmarkError.set('Benchmark JSON is invalid. Check its syntax and try again.');
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      this.retrievalBenchmarkError.set('Benchmark JSON must be an object.');
+      return;
+    }
+    const dataset = parsed as Record<string, unknown>;
+    if (dataset['version'] !== 1) {
+      this.retrievalBenchmarkError.set('Unsupported benchmark format version. Expected version 1.');
+      return;
+    }
+    const k = dataset['k'];
+    const rawCases = dataset['cases'];
+    const rawScope = dataset['scope'];
+    if (!Number.isInteger(k) || typeof k !== 'number' || k < 1 || k > 20) {
+      this.retrievalBenchmarkError.set('Benchmark JSON k must be a whole number between 1 and 20.');
+      return;
+    }
+    if (!Array.isArray(rawCases) || rawCases.length < 1 || rawCases.length > 20) {
+      this.retrievalBenchmarkError.set('Benchmark JSON must contain between 1 and 20 cases.');
+      return;
+    }
+    if (!rawScope || typeof rawScope !== 'object' || Array.isArray(rawScope)) {
+      this.retrievalBenchmarkError.set('Benchmark JSON must include a scope object.');
+      return;
+    }
+    const scope = {
+      subject_id: '',
+      study_material_id: '',
+      course_id: '',
+      syllabus_id: '',
+      topic_id: '',
+    };
+    for (const field of Object.keys(scope) as RetrievalBenchmarkScopeField[]) {
+      const value = (rawScope as Record<string, unknown>)[field];
+      if (value !== undefined && typeof value !== 'string') {
+        this.retrievalBenchmarkError.set(`Benchmark scope field "${field}" must be a string.`);
+        return;
+      }
+      if (typeof value === 'string') scope[field] = value.trim();
+    }
+    if (!Object.values(scope).some(Boolean)) {
+      this.retrievalBenchmarkError.set('Benchmark JSON scope must include at least one filter.');
+      return;
+    }
+
+    const cases: RetrievalBenchmarkCaseDraft[] = [];
+    for (const [index, rawCase] of rawCases.entries()) {
+      if (!rawCase || typeof rawCase !== 'object' || Array.isArray(rawCase)) {
+        this.retrievalBenchmarkError.set(`Benchmark case ${index + 1} must be an object.`);
+        return;
+      }
+      const item = rawCase as Record<string, unknown>;
+      const query = item['query'];
+      const relevantIds = item['relevant_chunk_ids'];
+      if (typeof query !== 'string' || !query.trim() || query.trim().length > 2_000) {
+        this.retrievalBenchmarkError.set(`Benchmark case ${index + 1} needs a query of 1–2,000 characters.`);
+        return;
+      }
+      if (
+        !Array.isArray(relevantIds)
+        || relevantIds.length < 1
+        || relevantIds.length > 50
+        || relevantIds.some((id) => typeof id !== 'string' || !id.trim())
+      ) {
+        this.retrievalBenchmarkError.set(`Benchmark case ${index + 1} needs between 1 and 50 non-empty relevant chunk IDs.`);
+        return;
+      }
+      cases.push({
+        query: query.trim(),
+        relevantChunkIds: [...new Set(relevantIds.map((id) => (id as string).trim()))].join(', '),
+      });
+    }
+
+    this.retrievalBenchmarkK.set(k);
+    this.retrievalBenchmarkScope.set(scope);
+    this.retrievalBenchmarkCases.set(cases);
+    this.retrievalBenchmarkResult.set(null);
+    this.retrievalBenchmarkError.set('');
+  }
+
+  public async runRetrievalBenchmark(): Promise<void> {
+    if (!this.canRunRetrievalBenchmark()) {
+      this.retrievalBenchmarkError.set('Sign in as faculty or an administrator to run a retrieval benchmark.');
+      return;
+    }
+    const payload = this.buildRetrievalBenchmarkPayload();
+    if (!payload) return;
+
+    this.retrievalBenchmarkLoading.set(true);
+    this.retrievalBenchmarkError.set('');
+    this.retrievalBenchmarkResult.set(null);
+    try {
+      const result = await firstValueFrom(this.http.post<RetrievalBenchmarkResult>(
+        '/api/retrieval/evaluate',
+        {
+          cases: payload.cases,
+          k: payload.k,
+          ...payload.scope,
+        },
+        { headers: this.authHeaders() },
+      ));
+      this.retrievalBenchmarkResult.set(result);
+    } catch (error: unknown) {
+      this.retrievalBenchmarkError.set(this.requestErrorDetail(error));
+    } finally {
+      this.retrievalBenchmarkLoading.set(false);
+    }
+  }
+
   public async loadGenerationRuns(): Promise<void> {
     if (!this.currentUser()) return;
     this.generationRunsLoading.set(true);
     try {
-      const runs = await firstValueFrom(this.http.get<GenerationRun[]>('/api/questions/generate/runs?limit=100', { headers: this.authHeaders() }));
+      const runs = await this.fetchGenerationRuns();
       this.generationRuns.set(runs);
+      this.generationRunsLoadedAt = Date.now();
       if (!this.selectedGenerationRun() && runs.length) this.selectedGenerationRun.set(runs[0]);
-    } catch {
-      this.setToast('Could not load generation traces.', 'error');
+    } catch (error: unknown) {
+      const detail = this.requestErrorDetail(error);
+      this.setToast(`Could not load generation sessions: ${detail}`, 'error');
     } finally {
       this.generationRunsLoading.set(false);
     }
+  }
+
+  private fetchGenerationRuns(): Promise<GenerationRun[]> {
+    return firstValueFrom(
+      this.http.get<GenerationRun[]>('/api/questions/generate/runs?limit=100', { headers: this.authHeaders() }),
+    );
+  }
+
+  private requestErrorDetail(error: unknown): string {
+    if (error instanceof HttpErrorResponse) {
+      const detail = error.error?.detail || error.error?.message;
+      return typeof detail === 'string' ? detail : `Request failed (${error.status || 'network error'}).`;
+    }
+    return error instanceof Error ? error.message : 'Unexpected request error.';
   }
 
   public selectGenerationRun(run: GenerationRun): void {
     this.selectedGenerationRun.set(run);
   }
 
+  public formatDuration(durationMs?: number): string {
+    if (durationMs === undefined) return '—';
+    if (durationMs < 1000) return `${Math.round(durationMs)} ms`;
+    return `${(durationMs / 1000).toFixed(1)} s`;
+  }
+
+  public liveGenerationRoute(): string {
+    const events = this.liveGenerationRun()?.logs || [];
+    return [...events].reverse().find((event) => event.stage === 'model_route')?.message || 'Awaiting model route';
+  }
+
   public async loadLibraryPapers(): Promise<void> {
     if (!this.currentUser()) return;
     this.libraryLoading.set(true);
+    this.libraryError.set('');
     try {
-      const runs = await firstValueFrom(this.http.get<GenerationRun[]>('/api/questions/generate/runs?limit=100', { headers: this.authHeaders() }));
+      const cacheIsFresh = Date.now() - this.generationRunsLoadedAt < 15_000;
+      const runs = cacheIsFresh ? this.generationRuns() : await this.fetchGenerationRuns();
+      this.generationRuns.set(runs);
+      this.generationRunsLoadedAt = Date.now();
       this.libraryPapers.set(runs.filter((run) =>
         run.request_type === 'paper' && run.status === 'completed' && Boolean(run.result?.length),
       ));
-    } catch {
-      this.setToast('Could not load previously created question papers.', 'error');
+    } catch (error: unknown) {
+      const detail = this.requestErrorDetail(error);
+      this.libraryError.set(detail);
+      this.setToast(`Could not load previously created question papers: ${detail}`, 'error');
     } finally {
       this.libraryLoading.set(false);
     }
@@ -596,13 +955,29 @@ export class App {
   }
 
   public openLogin(): void {
+    this.authMode.set('login');
     this.loginOpen.set(true);
     this.loginMessage.set('');
+  }
+
+  public switchAuthMode(mode: 'login' | 'register'): void {
+    this.authMode.set(mode);
+    this.loginMessage.set('');
+    this.loginPassword.set('');
   }
 
   public closeLogin(): void {
     this.loginOpen.set(false);
     this.loginMessage.set('');
+    this.loginPassword.set('');
+  }
+
+  public async submitAuth(): Promise<void> {
+    if (this.authMode() === 'register') {
+      await this.register();
+      return;
+    }
+    await this.login();
   }
 
   public async login(): Promise<void> {
@@ -624,6 +999,37 @@ export class App {
     } catch {
       this.loginMessage.set('Unable to sign in. Check your email and password.');
       this.setToast('Authentication failed. Please check your credentials.', 'error');
+    } finally {
+      this.loginState.set('ready');
+    }
+  }
+
+  public async register(): Promise<void> {
+    this.loginState.set('submitting');
+    this.loginMessage.set('Creating your account...');
+    try {
+      const res = await firstValueFrom(
+        this.http.post<{ access_token: string }>('/api/auth/register', {
+          email: this.loginEmail(),
+          password: this.loginPassword(),
+          role: this.registerRole(),
+        })
+      );
+      localStorage.setItem('atlas_exam_token', res.access_token);
+      localStorage.setItem('aug27_exam_token', res.access_token);
+      this.loginOpen.set(false);
+      this.loginPassword.set('');
+      await this.restoreSession();
+      this.setToast('Your account is ready. Welcome to Exam Studio!', 'success');
+    } catch (error) {
+      if (error instanceof HttpErrorResponse && error.status === 409) {
+        this.loginMessage.set('An account with this email already exists. Sign in instead.');
+      } else if (error instanceof HttpErrorResponse && error.status === 422) {
+        this.loginMessage.set('Enter a valid email and a password between 8 and 128 characters.');
+      } else {
+        this.loginMessage.set('Unable to create your account. Please try again.');
+      }
+      this.setToast('Account registration failed.', 'error');
     } finally {
       this.loginState.set('ready');
     }
@@ -680,12 +1086,14 @@ export class App {
 
     this.generating.set(true);
     this.generatingStep.set('1/3: Ingesting web reference & internet domain concepts...');
+    this.liveGenerationRun.set(null);
+    this.generationElapsedMs.set(0);
     this.setToast('Synthesizing questions from internet & open domain...', 'info');
 
     try {
-      const qs = await firstValueFrom(
-        this.http.post<Question[]>(
-          '/api/questions/generate',
+      const started = await firstValueFrom(
+        this.http.post<GenerationRun>(
+          '/api/questions/generate/start',
           {
             template_id: this.templateId(),
             query: this.query(),
@@ -694,10 +1102,16 @@ export class App {
             candidate_count: 1,
             top_k: 5,
             allow_web_knowledge: true,
+            validation_mode: this.validationMode(),
           },
-          { headers: this.authHeaders() }
-        )
+          { headers: this.authHeaders() },
+        ),
       );
+      const completed = await this.waitForSingleQuestionRun(started);
+      if (completed.status !== 'completed' || !completed.result) {
+        throw new Error(completed.error || 'Question generation did not return a completed result.');
+      }
+      const qs = completed.result;
       this.questions.set(qs);
       await this.evaluateGeneratedQuestions(qs);
       this.revealedAnswers.set({});
@@ -715,9 +1129,51 @@ export class App {
     }
   }
 
+  private async waitForSingleQuestionRun(started: GenerationRun): Promise<GenerationRun> {
+    let current = started;
+    while (true) {
+      this.liveGenerationRun.set(current);
+      this.generatingStep.set(current.message || 'Generating and validating the question...');
+      const startedAt = current.started_at ? Date.parse(current.started_at) : Number.NaN;
+      this.generationElapsedMs.set(Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : 0);
+      if (current.status !== 'queued' && current.status !== 'running') return current;
+
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      current = await firstValueFrom(
+        this.http.get<GenerationRun>(
+          `/api/questions/generate/runs/${current.id}`,
+          { headers: this.authHeaders() },
+        ),
+      );
+    }
+  }
+
   // Create Pattern Studio Methods
+  public readonly patternFormats = [
+    'Direct Concept & Application',
+    'Assertion & Reasoning',
+    'Scenario Analysis',
+    'Code Comprehension',
+    'Numerical Problem',
+    'Short Answer',
+    'Descriptive',
+    'Long Answer',
+  ];
+
   public togglePatternSectionBloom(index: number, level: string): void {
     this.togglePatternSectionChoice(index, 'supported_bloom_levels', level);
+  }
+
+  public setPatternSectionLevels(
+    index: number,
+    field: 'supported_difficulties' | 'supported_bloom_levels',
+    value: string,
+  ): void {
+    const levels = value.split(',').filter(Boolean);
+    if (!levels.length) return;
+    this.newPatternSections.update((sections) => sections.map((section, sectionIndex) =>
+      sectionIndex === index ? { ...section, [field]: levels } : section,
+    ));
   }
 
   public togglePatternSectionDifficulty(index: number, difficulty: string): void {
@@ -994,6 +1450,8 @@ export class App {
     }
 
     this.materialProcessing.set(true);
+    this.liveGenerationRun.set(null);
+    this.generationElapsedMs.set(0);
     this.resetGenerationTimeline();
     this.setGenerationStep('upload', 'active', 'Uploading and validating study material...');
 
@@ -1017,11 +1475,14 @@ export class App {
 
       const started = await firstValueFrom(this.http.post<GenerationRun>(
         '/api/questions/generate/paper/start',
-        { template_id: templateId, material_id: materialId, top_k: 5 },
+        { template_id: templateId, material_id: materialId, top_k: 5, validation_mode: this.paperValidationMode() },
         { headers: this.authHeaders() },
       ));
       const run = await this.waitForGenerationRun(started);
       if (run.status === 'failed') throw new Error(run.error || run.message || 'Generation failed.');
+      this.generationRuns.update((runs) => [run, ...runs.filter((item) => item.id !== run.id)]);
+      this.generationRunsLoadedAt = Date.now();
+      this.libraryPapers.update((papers) => [run, ...papers.filter((item) => item.id !== run.id)]);
       const paperQuestions = run.result || [];
       this.setGenerationStep('retrieve', 'complete');
       this.setGenerationStep('generate', 'complete', 'Question Generation Graph and quality agents completed the blueprint.');
@@ -1076,19 +1537,77 @@ export class App {
     this.generationTimeline.update((steps) => steps.map((step) => step.key === key ? { ...step, state } : step));
   }
 
+  public readonly questionProgress = computed(() => {
+    const run = this.liveGenerationRun();
+    const events = run?.logs || [];
+    const total = events.find((event) => event.details?.question_total)?.details?.question_total || (run ? 1 : 0);
+    const now = Date.parse(run?.started_at || '') + this.generationElapsedMs();
+    const rows = Array.from({ length: total }, (_, index) => ({ index: index + 1, state: 'Waiting', message: 'Waiting to generate', retries: 0, elapsedMs: 0, startedAt: 0, finishedAt: 0 }));
+    for (const event of events) {
+      const row = rows[(event.details?.question_index || 0) - 1];
+      if (!row) continue;
+      const timestamp = Date.parse(event.timestamp);
+      if (!row.startedAt && Number.isFinite(timestamp)) row.startedAt = timestamp;
+      if (event.stage === 'preparing') row.finishedAt = 0;
+      if (event.stage === 'candidate_retry') row.retries++;
+      // A later route/timing event must not erase an accepted question.
+      if (row.state === 'Validated' && event.stage !== 'preparing') continue;
+      row.state = event.stage === 'question_accepted' ? 'Validated' : event.stage === 'question_failed' ? 'Failed' : event.stage === 'candidate_retry' ? 'Retrying' : /validation|critic|solver|decision|review/.test(event.stage) ? 'Validating' : 'Generating';
+      row.message = row.state === 'Validated' ? 'Ready for review' : row.state === 'Failed' ? 'Could not pass the required checks' : row.state === 'Retrying' ? 'Repairing the question after a failed check' : row.state === 'Validating' ? 'Checking evidence, answer and duplicates' : 'Creating a question from source content';
+      if (row.state === 'Validated' || row.state === 'Failed') row.finishedAt = timestamp;
+    }
+    if (run?.status === 'completed') rows.forEach((row) => { row.state = 'Validated'; row.message = 'Ready for review'; });
+    if (run?.status === 'failed') rows.forEach((row) => { if (row.state !== 'Waiting' && row.state !== 'Validated') row.state = 'Failed'; });
+    rows.forEach((row) => { row.elapsedMs = row.startedAt && Number.isFinite(now) ? Math.max(0, (row.finishedAt || now) - row.startedAt) : 0; });
+    return rows;
+  });
+
+  public readonly validatedQuestionCount = computed(() => this.questionProgress().filter((row) => row.state === 'Validated').length);
+
+  public pipelineSteps(mode: 'normal' | 'competitive'): { title: string; detail: string; state: string }[] {
+    const run = this.liveGenerationRun();
+    const events = run?.logs || [];
+    const generating = events.some((event) => event.stage === 'preparing');
+    const validating = events.some((event) => event.stage === 'paper_validation') || (this.questionProgress().length > 0 && this.validatedQuestionCount() === this.questionProgress().length);
+    const finished = run?.status === 'completed';
+    const failed = run?.status === 'failed';
+    const state = (started: boolean, done: boolean): string => done ? 'complete' : started ? (failed ? 'error' : 'active') : 'pending';
+    const rows = mode === 'normal' ? this.generationTimeline().slice(0, 3).map((step) => step.state) : [
+      state(!!run, events.some((event) => event.stage === 'retrieval') || generating || finished),
+      state(events.some((event) => event.stage === 'retrieval'), generating || finished),
+      state(generating, generating || finished),
+    ];
+    const titles = mode === 'normal' ? ['Upload document', 'Parse and clean', 'Create index'] : ['Analyze syllabus', 'Retrieve concepts', 'Plan question'];
+    const details = mode === 'normal' ? ['Check your study material', 'Extract text and create chunks', 'Build semantic retrieval'] : ['Understand the topic and scope', 'Select supporting evidence', 'Apply pattern and Bloom level'];
+    return [
+      ...titles.map((title, index) => ({ title, detail: details[index], state: rows[index] || 'pending' })),
+      { title: 'Generate questions', detail: 'Create and check each question', state: state(generating, validating || finished) },
+      { title: 'Validate', detail: 'Check the completed question set', state: state(validating, finished) },
+      { title: 'Complete', detail: 'Questions ready for review', state: finished ? 'complete' : failed ? 'error' : 'pending' },
+    ];
+  }
+
+  public readonly questionProgressPercent = computed(() => {
+    const rows = this.questionProgress();
+    const percent = rows.length ? Math.floor(100 * rows.filter((row) => row.state === 'Validated').length / rows.length) : 0;
+    return this.liveGenerationRun()?.status === 'completed' ? 100 : Math.min(99, percent);
+  });
+
   private async waitForGenerationRun(run: GenerationRun): Promise<GenerationRun> {
     let current = run;
-    while (current.status === 'queued' || current.status === 'running') {
-      if (current.stage === 'blueprint' || current.stage === 'generation') {
+    while (true) {
+      this.liveGenerationRun.set(current);
+      const startedAt = current.started_at ? Date.parse(current.started_at) : Number.NaN;
+      this.generationElapsedMs.set(Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : 0);
+      if (current.logs?.some((event) => event.stage === 'blueprint')) {
         this.setGenerationStep('retrieve', 'complete');
-        this.setGenerationStep('generate', 'active', current.message || 'Question Generation Graph is producing and validating candidates...');
-      } else if (current.message) {
-        this.materialStatus.set(current.message);
+        this.setGenerationStep('generate', 'active');
       }
+      this.materialStatus.set(current.message || 'Waiting for generation worker...');
+      if (current.status !== 'queued' && current.status !== 'running') return current;
       await new Promise((resolve) => setTimeout(resolve, 700));
       current = await firstValueFrom(this.http.get<GenerationRun>(`/api/questions/generate/runs/${current.id}`, { headers: this.authHeaders() }));
     }
-    return current;
   }
 
   // Single Question Actions

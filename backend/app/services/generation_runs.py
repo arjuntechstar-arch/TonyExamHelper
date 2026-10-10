@@ -5,6 +5,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from threading import Lock
+from time import monotonic
 from typing import Callable
 from uuid import uuid4
 
@@ -25,15 +26,42 @@ class GenerationRun:
     result: list[dict] | None = None
     error: str | None = None
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    metrics: dict[str, int | float] = field(default_factory=dict)
+    started_monotonic: float = field(default_factory=monotonic, repr=False, compare=False)
     on_update: Callable[["GenerationRun"], None] | None = field(default=None, repr=False, compare=False)
+    _lock: Lock = field(default_factory=Lock, repr=False, compare=False)
 
-    def log(self, message: str, *, stage: str | None = None, level: str = "info") -> None:
-        if stage:
-            self.stage = stage
-        self.message = message
-        self.updated_at = datetime.now(UTC).isoformat()
-        self.logs.append({"timestamp": self.updated_at, "stage": self.stage, "level": level, "message": message})
-        logger.info("generation_run=%s stage=%s message=%s", self.id, self.stage, message)
+    def log(
+        self,
+        message: str,
+        *,
+        stage: str | None = None,
+        level: str = "info",
+        duration_ms: float | None = None,
+        metric_deltas: dict[str, int | float] | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        with self._lock:
+            if stage:
+                self.stage = stage
+            self.message = message
+            self.updated_at = datetime.now(UTC).isoformat()
+            event: dict[str, object] = {
+                "timestamp": self.updated_at,
+                "stage": self.stage,
+                "level": level,
+                "message": message,
+            }
+            if duration_ms is not None:
+                event["duration_ms"] = round(duration_ms, 2)
+            if details:
+                event["details"] = dict(details)
+            if metric_deltas:
+                for key, value in metric_deltas.items():
+                    self.metrics[key] = self.metrics.get(key, 0) + value
+            self.logs.append(event)
+            current_stage = self.stage
+        logger.info("generation_run=%s stage=%s message=%s", self.id, current_stage, message)
         if self.on_update:
             try:
                 self.on_update(self)
@@ -41,19 +69,21 @@ class GenerationRun:
                 logger.exception("Could not persist generation run %s", self.id)
 
     def snapshot(self) -> dict:
-        return {
-            "id": self.id,
-            "status": self.status,
-            "stage": self.stage,
-            "message": self.message,
-            "request_type": self.request_type,
-            "user_id": self.user_id,
-            "started_at": self.started_at,
-            "logs": list(self.logs),
-            "result": self.result,
-            "error": self.error,
-            "updated_at": self.updated_at,
-        }
+        with self._lock:
+            return {
+                "id": self.id,
+                "status": self.status,
+                "stage": self.stage,
+                "message": self.message,
+                "request_type": self.request_type,
+                "user_id": self.user_id,
+                "started_at": self.started_at,
+                "logs": list(self.logs),
+                "result": self.result,
+                "error": self.error,
+                "updated_at": self.updated_at,
+                "metrics": dict(self.metrics),
+            }
 
 
 class GenerationRunStore:
@@ -86,19 +116,24 @@ class GenerationRunStore:
 
     @staticmethod
     def complete(run: GenerationRun, result: list[dict] | None = None) -> None:
-        run.result = result
-        run.status = "completed"
+        with run._lock:
+            run.result = result
+            run.status = "completed"
+            run.metrics["total_duration_ms"] = round((monotonic() - run.started_monotonic) * 1000, 2)
         run.log("Generation completed successfully.", stage="completed")
 
     @staticmethod
     def fail(run: GenerationRun, error: Exception | str) -> None:
-        run.status = "failed"
-        run.error = str(error)
+        with run._lock:
+            run.status = "failed"
+            run.error = str(error)
+            run.metrics["total_duration_ms"] = round((monotonic() - run.started_monotonic) * 1000, 2)
         run.log(f"Generation failed: {error}", stage="failed", level="error")
 
     @staticmethod
     def _execute(run: GenerationRun, worker, *args, **kwargs) -> None:
-        run.status = "running"
+        with run._lock:
+            run.status = "running"
         run.log("Generation worker started.", stage="started")
         try:
             GenerationRunStore.complete(run, worker(run, *args, **kwargs))

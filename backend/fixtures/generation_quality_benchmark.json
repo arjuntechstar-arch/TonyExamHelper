@@ -1,0 +1,162 @@
+{
+  "name": "generation-quality-v1",
+  "version": 1,
+  "cases": [
+    {
+      "case_id": "dev-arrays-binary-search",
+      "split": "development",
+      "request": {
+        "topic": "binary search",
+        "question_type": "MCQ",
+        "pattern": "Scenario Based",
+        "difficulty": "Medium",
+        "bloom_level": "Apply"
+      },
+      "context": [
+        {
+          "chunk_id": "arrays-01",
+          "page": 4,
+          "content": "Binary search works on a sorted array. It compares the target with the middle element, then discards the half that cannot contain the target. Each iteration reduces the remaining search interval by about half."
+        }
+      ],
+      "expected": {
+        "question_type": "MCQ",
+        "pattern": "Scenario Based",
+        "difficulty": "Medium",
+        "bloom_level": "Apply",
+        "reference_answer": "Compare the target with the middle element and discard the half that cannot contain it, reducing the search interval by about half.",
+        "evidence_chunk_ids": ["arrays-01"]
+      }
+    },
+    {
+      "case_id": "dev-graphs-breadth-first",
+      "split": "development",
+      "request": {
+        "topic": "breadth-first graph traversal",
+        "question_type": "MCQ",
+        "pattern": "Direct Concept",
+        "difficulty": "Easy",
+        "bloom_level": "Understand"
+      },
+      "context": [
+        {
+          "chunk_id": "graphs-02",
+          "page": 11,
+          "content": "Breadth-first search explores a graph in layers from a starting vertex. A FIFO queue stores discovered vertices so that vertices nearer the start are processed before vertices farther away."
+        }
+      ],
+      "expected": {
+        "question_type": "MCQ",
+        "pattern": "Direct Concept",
+        "difficulty": "Easy",
+        "bloom_level": "Understand",
+        "reference_answer": "A FIFO queue processes discovered vertices in layers, nearer vertices before farther vertices.",
+        "evidence_chunk_ids": ["graphs-02"]
+      }
+    },
+    {
+      "case_id": "dev-sorting-stability",
+      "split": "development",
+      "request": {
+        "topic": "stable sorting",
+        "question_type": "Short Answer",
+        "pattern": "Explain",
+        "difficulty": "Medium",
+        "bloom_level": "Analyze"
+      },
+      "context": [
+        {
+          "chunk_id": "sorting-03",
+          "page": 27,
+          "content": "A stable sorting algorithm preserves the relative order of records that have equal keys. Stability matters when sorting records by multiple fields in successive passes."
+        }
+      ],
+      "expected": {
+        "question_type": "Short Answer",
+        "pattern": "Explain",
+        "difficulty": "Medium",
+        "bloom_level": "Analyze",
+        "reference_answer": "A stable sort preserves the original relative order of records with equal keys.",
+        "evidence_chunk_ids": ["sorting-03"]
+      }
+    },
+    {
+      "case_id": "dev-databases-acid",
+      "split": "development",
+      "request": {
+        "topic": "database atomicity",
+        "question_type": "MCQ",
+        "pattern": "Direct Concept",
+        "difficulty": "Easy",
+        "bloom_level": "Remember"
+      },
+      "context": [
+        {
+          "chunk_id": "database-04",
+          "page": 9,
+          "content": "Atomicity is the all-or-nothing property of a database transaction. If a transaction fails before commit, its partial changes are rolled back rather than left visible."
+        }
+      ],
+      "expected": {
+        "question_type": "MCQ",
+        "pattern": "Direct Concept",
+        "difficulty": "Easy",
+        "bloom_level": "Remember",
+        "reference_answer": "A transaction's changes are applied completely or rolled back completely; partial changes are not retained.",
+        "evidence_chunk_ids": ["database-04"]
+      }
+    },
+    {
+      "case_id": "holdout-os-deadlock",
+      "split": "held_out",
+      "request": {
+        "topic": "deadlock prevention",
+        "question_type": "Short Answer",
+        "pattern": "Explain",
+        "difficulty": "Hard",
+        "bloom_level": "Analyze"
+      },
+      "context": [
+        {
+          "chunk_id": "os-05",
+          "page": 42,
+          "content": "Deadlock requires mutual exclusion, hold and wait, no preemption, and circular wait. A system can prevent circular wait by assigning a global order to resource types and requiring processes to request resources only in that order."
+        }
+      ],
+      "expected": {
+        "question_type": "Short Answer",
+        "pattern": "Explain",
+        "difficulty": "Hard",
+        "bloom_level": "Analyze",
+        "reference_answer": "Impose a global order on resource types and require requests to follow that order, preventing circular wait.",
+        "evidence_chunk_ids": ["os-05"]
+      }
+    },
+    {
+      "case_id": "holdout-probability-bayes",
+      "split": "held_out",
+      "request": {
+        "topic": "Bayes theorem",
+        "question_type": "MCQ",
+        "pattern": "Scenario Based",
+        "difficulty": "Hard",
+        "bloom_level": "Apply"
+      },
+      "context": [
+        {
+          "chunk_id": "probability-06",
+          "page": 18,
+          "content": "Bayes' theorem updates the probability of a hypothesis after observing evidence. The posterior is proportional to the likelihood of the evidence under the hypothesis multiplied by the prior probability, then normalized by the evidence probability."
+        }
+      ],
+      "expected": {
+        "question_type": "MCQ",
+        "pattern": "Scenario Based",
+        "difficulty": "Hard",
+        "bloom_level": "Apply",
+        "reference_answer": "The posterior probability is proportional to the likelihood of the evidence under the hypothesis times the prior, normalized by the evidence probability.",
+        "evidence_chunk_ids": ["probability-06"]
+      }
+    }
+  ]
+}

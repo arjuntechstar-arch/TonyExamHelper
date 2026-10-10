@@ -1,5 +1,7 @@
 import logging
 from datetime import UTC, datetime
+from time import perf_counter
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -11,11 +13,18 @@ from app.core.database import get_database
 from app.core.config import Settings, get_settings
 from app.models import QuestionDocument, QuestionTemplateDocument, UserDocument
 from app.services.assessment_schema import section_format_error
-from app.services.generation import FailoverProvider, GeneratedQuestion, GenerationError, NvidiaProvider, OpenAICompatibleProvider, OpenRouterProvider, ProviderRateLimitError
+from app.services.generation import FailoverProvider, GeneratedQuestion, GenerationError, NvidiaProvider, OllamaProvider, OpenAICompatibleProvider, OpenRouterProvider, ProviderRateLimitError
 from app.services.question_agents import QuestionGenerationGraph
 from app.services.generation_runs import generation_runs, GenerationRun
 from app.services.quality import QuestionQualityService, ValidationResult, validate_paper
-from app.services.retrieval import RetrievalService
+from app.services.retrieval import (
+    EmbeddingConfigurationError,
+    EmbeddingProviderError,
+    RetrievalService,
+    VectorSearchError,
+    embedding_provider_from_settings,
+)
+from app.services.web_search import TavilySearchProvider, WebSearchError
 
 router = APIRouter(prefix="/questions", tags=["questions"])
 QuestionUser = Depends(get_current_user)
@@ -37,6 +46,7 @@ class GenerateRequest(BaseModel):
     # Multi-question selection will return as an explicit UI feature.
     candidate_count: int = Field(default=1, ge=1, le=1)
     top_k: int = Field(default=5, ge=1, le=50)
+    validation_mode: Literal["fast", "strict"] = "strict"
     subject_id: str | None = None
     course_id: str | None = None
     syllabus_id: str | None = None
@@ -49,6 +59,7 @@ class BatchGenerateRequest(BaseModel):
 
 
 class PaperGenerateRequest(BaseModel):
+    validation_mode: Literal["fast", "strict"] = "strict"
     template_id: str
     difficulty: str = Field(default="Medium", min_length=1, max_length=50)
     bloom_level: str = Field(default="Understand", min_length=1, max_length=50)
@@ -121,23 +132,47 @@ def _resolve_generation_template(
     )
 
 
-def _open_domain_chunks(query: str) -> list[dict]:
-    """Provide a bounded, traceable fallback context for the web workshop."""
-    from app.models import DocumentChunkDocument
+def _web_search_chunks(query: str, settings: Settings) -> list[dict]:
+    if not settings.tavily_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Web search is not configured. Set TAVILY_API_KEY, or upload and index study material first.",
+        )
+    try:
+        return TavilySearchProvider(settings.tavily_api_key).search(
+            query,
+            max_results=settings.tavily_max_results,
+        )
+    except WebSearchError as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Web search failed: {error}",
+        ) from error
 
-    synthetic_chunk = DocumentChunkDocument(
-        id="web-knowledge-chunk-1",
-        study_material_id="open-web-knowledge",
-        chunk_index=0,
-        page_number=1,
-        content=(
-            f"Comprehensive open-domain web reference on {query}. "
-            f"Covers fundamental concepts, theoretical models, practical applications, analysis, evaluation, "
-            f"and core engineering principles regarding {query}."
-        ),
-        metadata={"source": "open_domain_web", "topic": query},
-    )
-    return [{"chunk": synthetic_chunk, "score": 1.0}]
+
+def _attach_web_citations(
+    questions: list[GeneratedQuestion],
+    chunks: list[dict],
+) -> list[GeneratedQuestion]:
+    sources = {
+        item["chunk"].id: item["chunk"].metadata
+        for item in chunks
+        if item["chunk"].metadata.get("source") == "web_search"
+    }
+    if not sources:
+        return questions
+    enriched: list[GeneratedQuestion] = []
+    for question in questions:
+        citations = [
+            source.model_copy(update={
+                "title": sources[source.chunk_id]["title"],
+                "url": sources[source.chunk_id]["url"],
+            })
+            if source.chunk_id in sources else source
+            for source in question.sources
+        ]
+        enriched.append(question.model_copy(update={"sources": citations}))
+    return enriched
 
 
 def _reserve_daily_quota(database: Database, user_id: str, requested: int) -> dict:
@@ -174,32 +209,67 @@ def _personal_guidance(database: Database, user_id: str) -> str | None:
     return " ".join(parts) or None
 
 
+def _retrieval_service(database: Database) -> RetrievalService:
+    settings = get_settings()
+    return RetrievalService(
+        database,
+        embedding_provider=embedding_provider_from_settings(settings),
+        vector_index_name=settings.retrieval_vector_index_name,
+    )
+
+
 def generate_questions(payload: GenerateRequest, database: Database, user_id: str | None = None, trace=None) -> list[GeneratedQuestion]:
     template = _resolve_generation_template(
         database,
         payload.template_id,
         allow_web_knowledge=payload.allow_web_knowledge,
     )
-    chunks = RetrievalService(database).retrieve(
-        payload.query,
-        top_k=payload.top_k,
-        subject_id=payload.subject_id,
-        course_id=payload.course_id,
-        syllabus_id=payload.syllabus_id,
-        topic_id=payload.topic_id,
-    )
+    settings = get_settings()
+    try:
+        retrieval_service = _retrieval_service(database)
+        retrieval_started = perf_counter()
+        chunks = retrieval_service.retrieve(
+            payload.query,
+            top_k=payload.top_k,
+            subject_id=payload.subject_id,
+            course_id=payload.course_id,
+            syllabus_id=payload.syllabus_id,
+            topic_id=payload.topic_id,
+        )
+    except (EmbeddingConfigurationError, EmbeddingProviderError, VectorSearchError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+    retrieval_duration_ms = (perf_counter() - retrieval_started) * 1000
     if trace:
-        trace(f"Retrieved {len(chunks)} ranked source chunks for query '{payload.query[:120]}'.", stage="retrieval")
+        trace(
+            f"Retrieved {len(chunks)} ranked source chunks in {retrieval_duration_ms / 1000:.2f}s for query '{payload.query[:120]}'.",
+            stage="retrieval",
+            duration_ms=retrieval_duration_ms,
+            metric_deltas={"retrieval_duration_ms": retrieval_duration_ms},
+        )
     if not chunks:
         if payload.allow_web_knowledge:
-            chunks = _open_domain_chunks(payload.query)
+            web_search_started = perf_counter()
+            chunks = _web_search_chunks(payload.query, get_settings())
+            web_search_duration_ms = (perf_counter() - web_search_started) * 1000
+            if trace:
+                trace(
+                    f"Retrieved {len(chunks)} real web sources in {web_search_duration_ms / 1000:.2f}s for the topic.",
+                    stage="web_search",
+                    duration_ms=web_search_duration_ms,
+                    metric_deltas={
+                        "web_search_duration_ms": web_search_duration_ms,
+                        "web_sources": len(chunks),
+                    },
+                )
         else:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="No indexed source chunks are available for this query. Process and index study material first.",
             )
     try:
-        settings = get_settings()
         provider = _configured_provider(settings)
         if provider is None:
             raise HTTPException(
@@ -207,7 +277,11 @@ def generate_questions(payload: GenerateRequest, database: Database, user_id: st
                 detail="No AI generation model is available. Configure a supported provider API key and model, then try again.",
             )
         _attach_failover_trace(provider, trace)
-        critic_provider = _configured_provider(settings, settings.llm_critic_model) if settings.llm_critic_model else provider
+        critic_provider = (
+            _configured_provider(settings, settings.llm_critic_model)
+            if payload.validation_mode == "strict" and settings.llm_critic_model
+            else provider
+        )
         if critic_provider is not provider:
             _attach_failover_trace(critic_provider, trace)
         existing_questions = _existing_questions(
@@ -216,15 +290,34 @@ def generate_questions(payload: GenerateRequest, database: Database, user_id: st
             syllabus_id=payload.syllabus_id,
             template_id=payload.template_id,
         )
+        def retrieve_additional_evidence(question: GeneratedQuestion) -> list[dict]:
+            return retrieval_service.retrieve(
+                f"{payload.query}\n{question.question_text}",
+                top_k=min(payload.top_k + 5, 50),
+                subject_id=payload.subject_id,
+                course_id=payload.course_id,
+                syllabus_id=payload.syllabus_id,
+                topic_id=payload.topic_id,
+            )
+
         try:
-            return QuestionGenerationGraph(provider=provider, critic_provider=critic_provider).generate(
+            graph = QuestionGenerationGraph(
+                provider=provider,
+                critic_provider=critic_provider,
+                max_retries=1,
+                max_attempts_per_question=2 if payload.validation_mode == "fast" else 5,
+            )
+            generated = graph.generate(
                 template=template,
                 chunks=chunks,
                 difficulty=payload.difficulty,
                 bloom_level=payload.bloom_level,
                 candidate_count=payload.candidate_count,
                 existing_questions=existing_questions, guidance=_personal_guidance(database, user_id) if user_id else None, trace=trace,
+                run_llm_review=payload.validation_mode == "strict",
+                retrieve_additional_evidence=retrieve_additional_evidence,
             )
+            return _attach_web_citations(generated, chunks)
         except ProviderRateLimitError:
             # The deterministic baseline cannot produce production-quality
             # distractors or concept synthesis. Never silently publish it when
@@ -234,16 +327,27 @@ def generate_questions(payload: GenerateRequest, database: Database, user_id: st
             if provider is None:
                 raise
             logger.warning("Configured LLM provider failed; using deterministic fallback.", exc_info=True)
-            return QuestionGenerationGraph().generate(
+            generated = QuestionGenerationGraph(
+                max_retries=1,
+                max_attempts_per_question=2 if payload.validation_mode == "fast" else 5,
+            ).generate(
                 template=template,
                 chunks=chunks,
                 difficulty=payload.difficulty,
                 bloom_level=payload.bloom_level,
                 candidate_count=payload.candidate_count,
                 existing_questions=existing_questions, guidance=_personal_guidance(database, user_id) if user_id else None, trace=trace,
+                run_llm_review=payload.validation_mode == "strict",
+                retrieve_additional_evidence=retrieve_additional_evidence,
             )
+            return _attach_web_citations(generated, chunks)
     except ProviderRateLimitError as error:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="The configured question model is rate-limited. No fallback paper was created; retry after the provider cooldown.") from error
+    except (EmbeddingConfigurationError, EmbeddingProviderError, VectorSearchError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
     except GenerationError as error:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)) from error
 
@@ -256,6 +360,7 @@ def generate(
 ) -> list[GeneratedQuestion]:
     _reserve_daily_quota(database, user.id, payload.candidate_count)
     run = generation_runs.begin(request_type="single", user_id=user.id, on_update=lambda item: _persist_run(database, item))
+    run.log("Single-question generation worker started.", stage="started")
     try:
         questions = generate_questions(payload, database, user.id, trace=run.log)
         generation_runs.complete(run, [question.model_dump() for question in questions])
@@ -263,6 +368,28 @@ def generate(
     except Exception as error:
         generation_runs.fail(run, error)
         raise
+
+
+@router.post("/generate/start")
+def start_single_question_generation(
+    payload: GenerateRequest,
+    database: Database = Depends(get_database),
+    user: UserDocument = QuestionUser,
+) -> dict:
+    _reserve_daily_quota(database, user.id, payload.candidate_count)
+
+    def worker(run: GenerationRun) -> list[dict]:
+        run.log("Starting single-question generation.", stage="started")
+        questions = generate_questions(payload, database, user.id, trace=run.log)
+        return [question.model_dump() for question in questions]
+
+    run = generation_runs.create(
+        worker,
+        request_type="single",
+        user_id=user.id,
+        on_update=lambda item: _persist_run(database, item),
+    )
+    return run.snapshot()
 
 
 @router.post("/generate/batch", response_model=list[list[GeneratedQuestion]])
@@ -298,7 +425,8 @@ def generate_paper(
         allow_web_knowledge=payload.allow_web_knowledge,
     )
     try:
-        retrieval = RetrievalService(database)
+        retrieval = _retrieval_service(database)
+        retrieval_started = perf_counter()
         if payload.material_id:
             chunks = retrieval.retrieve_all(
                 subject_id=payload.subject_id,
@@ -323,13 +451,29 @@ def generate_paper(
                 syllabus_id=payload.syllabus_id,
                 topic_id=payload.topic_id,
             )
+        retrieval_duration_ms = (perf_counter() - retrieval_started) * 1000
         if trace:
-            trace(f"Retrieved {len(chunks)} source chunks for paper generation.", stage="retrieval")
+            trace(
+                f"Retrieved {len(chunks)} source chunks in {retrieval_duration_ms / 1000:.2f}s for paper generation.",
+                stage="retrieval",
+                duration_ms=retrieval_duration_ms,
+                metric_deltas={"retrieval_duration_ms": retrieval_duration_ms},
+            )
         if not chunks:
             if payload.allow_web_knowledge and payload.query:
-                chunks = _open_domain_chunks(payload.query)
+                web_search_started = perf_counter()
+                chunks = _web_search_chunks(payload.query, get_settings())
+                web_search_duration_ms = (perf_counter() - web_search_started) * 1000
                 if trace:
-                    trace("No local source chunks found; using open-domain workshop context.", stage="retrieval")
+                    trace(
+                        f"No indexed source chunks matched; retrieved {len(chunks)} real web sources in {web_search_duration_ms / 1000:.2f}s.",
+                        stage="web_search",
+                        duration_ms=web_search_duration_ms,
+                        metric_deltas={
+                            "web_search_duration_ms": web_search_duration_ms,
+                            "web_sources": len(chunks),
+                        },
+                    )
             else:
                 raise HTTPException(status_code=422, detail="No indexed source chunks are available. Upload material or provide a competitive-exam topic.")
         generated: list[GeneratedQuestion] = []
@@ -347,7 +491,11 @@ def generate_paper(
                 detail="No AI generation model is available. Configure a supported provider API key and model, then try again.",
             )
         _attach_failover_trace(provider, trace)
-        critic_provider = _configured_provider(settings, settings.llm_critic_model) if settings.llm_critic_model else provider
+        critic_provider = (
+            _configured_provider(settings, settings.llm_critic_model)
+            if settings.llm_critic_model
+            else provider
+        )
         if critic_provider is not provider:
             _attach_failover_trace(critic_provider, trace)
         sections = template.sections or [{
@@ -356,6 +504,8 @@ def generate_paper(
             "count": payload.question_count,
             "marks": template.marks,
         }]
+        if trace:
+            trace("Question blueprint ready.", stage="blueprint", details={"question_total": sum(int(section["count"]) for section in sections)})
         for section in sections:
             format_error = section_format_error(str(section["question_type"]), str(section["pattern"]), int(section["marks"]))
             if format_error:
@@ -393,9 +543,11 @@ def generate_paper(
                             difficulty=difficulty,
                             bloom_level=bloom_level,
                                 candidate_count=candidate_count,
+                                question_offset=len(generated),
                                 existing_questions=existing_questions + generated,
                                 allow_partial=True,
-                                trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
+                                trace=trace,
+                                run_llm_review=payload.validation_mode == "strict", guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
                         )
                     )
                 except ProviderRateLimitError:
@@ -413,9 +565,11 @@ def generate_paper(
                             difficulty=difficulty,
                             bloom_level=bloom_level,
                                 candidate_count=candidate_count,
+                                question_offset=len(generated),
                                 existing_questions=existing_questions + generated,
                                 allow_partial=True,
-                                trace=trace, guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
+                                trace=trace,
+                                run_llm_review=payload.validation_mode == "strict", guidance=_personal_guidance(database, getattr(user, "id", "")) if getattr(user, "id", None) else None,
                         )
                     )
         paper_issues = validate_paper(generated, sections=sections)
@@ -426,9 +580,14 @@ def generate_paper(
             raise GenerationError(detail)
         if trace:
             trace("Final paper validation passed: blueprint, response schema, and semantic uniqueness verified.", stage="paper_validation")
-        return generated
+        return _attach_web_citations(generated, chunks)
     except ProviderRateLimitError as error:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="The configured question model is rate-limited. No fallback paper was created; retry after the provider cooldown.") from error
+    except (EmbeddingConfigurationError, EmbeddingProviderError, VectorSearchError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
     except (GenerationError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -496,6 +655,22 @@ def get_generation_run(
 
 
 def _configured_provider(settings: Settings, model_override: str | None = None):
+    if settings.llm_provider.casefold() == "ollama":
+        if not settings.ollama_base_url:
+            return None
+        try:
+            return OllamaProvider(
+                settings.ollama_base_url,
+                model_override or settings.ollama_model,
+                settings.ollama_timeout_seconds,
+                settings.ollama_api_key,
+            )
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Ollama provider configuration is invalid: {error}",
+            ) from error
+
     # OpenRouter keys are used in order. We advance only on HTTP 429; NVIDIA
     # is intentionally the final hosted fallback for this deployment.
     openrouter_configs = (
@@ -519,8 +694,16 @@ def _configured_provider(settings: Settings, model_override: str | None = None):
 
 def _attach_failover_trace(provider: object, trace) -> None:
     """Record route rotation without exposing API keys in request traces."""
-    if trace and isinstance(provider, FailoverProvider):
+    if not trace:
+        return
+    if isinstance(provider, FailoverProvider):
         provider.on_failover = lambda message: trace(message, stage="model_failover", level="warning")
+        provider.on_route = lambda message: trace(f"Successful model route: {message}.", stage="model_route")
+    else:
+        provider_name = getattr(provider, "provider_name", provider.__class__.__name__)
+        model = getattr(provider, "model", None)
+        model_label = f", model={model}" if isinstance(model, str) and model else ""
+        trace(f"Configured model route: {provider_name}{model_label}.", stage="model_route")
 
 
 def _existing_questions(
@@ -570,7 +753,7 @@ def create_question(
         explanation=payload.question.explanation,
         difficulty=payload.question.difficulty,
         bloom_level=payload.question.bloom_level,
-        sources=[source.model_dump() for source in payload.question.sources],
+        sources=[source.model_dump(exclude_none=True) for source in payload.question.sources],
         template_id=payload.template_id,
         subject_id=subject_id,
         syllabus_id=payload.syllabus_id,

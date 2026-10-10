@@ -39,6 +39,18 @@ class Settings(BaseSettings):
     nvidia_model: str = "moonshotai/kimi-k3"
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     nvidia_timeout_seconds: int = Field(default=60, ge=10, le=300)
+    ollama_base_url: str | None = None
+    ollama_api_key: str | None = None
+    ollama_model: str = "qwen2.5:32b"
+    ollama_timeout_seconds: int = Field(default=300, ge=10, le=900)
+    tavily_api_key: str | None = None
+    tavily_max_results: int = Field(default=5, ge=1, le=10)
+    retrieval_embedding_api_base_url: str | None = None
+    retrieval_embedding_api_key: str | None = None
+    retrieval_embedding_model: str | None = None
+    retrieval_embedding_dimensions: int | None = Field(default=None, ge=1, le=4096)
+    retrieval_embedding_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    retrieval_vector_index_name: str = "document_chunks_vector_v1"
 
     model_config = SettingsConfigDict(
         env_file=Path(__file__).resolve().parents[3] / ".env",

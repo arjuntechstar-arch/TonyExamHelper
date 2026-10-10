@@ -31,13 +31,37 @@ function Show-Usage {
 
 function Stop-ProcessTree([int]$ProcessId) {
     if (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) {
-        & taskkill.exe /PID $ProcessId /T /F | Out-Null
+        & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
     }
 }
 
 function Assert-Command([string]$Name) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         throw "Required command '$Name' was not found on PATH."
+    }
+}
+
+function Assert-NodeVersion {
+    Assert-Command 'node'
+
+    $NodeVersionOutput = & node --version
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Unable to determine the installed Node.js version.'
+    }
+
+    $NodeVersion = ($NodeVersionOutput | Select-Object -First 1).ToString().Trim()
+    if ($NodeVersion -notmatch '^v?(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)') {
+        throw "Unable to parse Node.js version '$NodeVersion'."
+    }
+
+    $MajorVersion = [int]$Matches.major
+    $MinorVersion = [int]$Matches.minor
+    $IsSupported = ($MajorVersion -eq 20 -and $MinorVersion -ge 19) `
+        -or ($MajorVersion -eq 22 -and $MinorVersion -ge 12) `
+        -or ($MajorVersion -ge 24)
+
+    if (-not $IsSupported) {
+        throw "Angular CLI 21 requires Node.js v20.19.0+, v22.12.0+, or v24+. Found $NodeVersion. Install a supported version from https://nodejs.org/ and rerun this script."
     }
 }
 
@@ -65,8 +89,17 @@ function Wait-TcpPort([string]$HostName, [int]$Port, [int]$TimeoutSeconds = 30) 
 }
 
 function Assert-PythonDependencies([string]$Executable) {
-    & $Executable -c 'import fastapi, uvicorn, pymongo' 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $Executable -c 'import fastapi, uvicorn, pymongo' 2>$null
+        $DependencyCheckExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+
+    if ($DependencyCheckExitCode -ne 0) {
         Write-Host 'Backend dependencies are missing. Installing them...'
         & $Executable -m pip install -r (Join-Path $BackendPath 'requirements.txt')
         if ($LASTEXITCODE -ne 0) {
@@ -81,6 +114,7 @@ if ($Help) {
 }
 
 Assert-Command 'npm'
+Assert-NodeVersion
 
 if (-not (Test-Path $PythonPath)) {
     if (Get-Command python -ErrorAction SilentlyContinue) {

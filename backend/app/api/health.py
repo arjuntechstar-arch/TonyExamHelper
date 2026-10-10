@@ -21,6 +21,17 @@ class HealthResponse(BaseModel):
 @router.get("/health", response_model=HealthResponse)
 def health(settings: Settings = get_settings()) -> HealthResponse:
     provider = settings.llm_provider.casefold()
+    if provider == "ollama":
+        configured = bool(settings.ollama_base_url and settings.ollama_model)
+        return HealthResponse(
+            status="ok",
+            service="api",
+            timestamp=datetime.now(UTC),
+            model_status="configured" if configured else "unavailable",
+            model_provider="Ollama",
+            model_name=settings.ollama_model if configured else None,
+        )
+
     openrouter_key_count = sum(bool(key) for key in (
         settings.openrouter_api_key,
         settings.openrouter2_api_key,

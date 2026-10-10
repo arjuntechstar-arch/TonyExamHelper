@@ -7,15 +7,18 @@ AI Examination Studio is a full-stack question-generation and assessment platfor
 The backend currently covers the core academic and assessment workflow:
 
 - authentication and RBAC
+- public email/password registration for student and faculty accounts
 - subject, course, syllabus, and topic management
 - study material upload, validation, extraction, and chunking
-- retrieval and indexing support
+- retrieval and indexing with stop-word-filtered BM25/keyword ranking, quoted exact-phrase matching, and diversity-aware result selection; optional embedding-provider and MongoDB Atlas Vector Search fusion
+- deterministic retrieval evaluation with Precision@k, Recall@k, MRR@k, and nDCG@k benchmark metrics
 - template-driven question generation
 - question review, approval, and bank creation
 - model-paper generation and publication
 - student practice and scoring
 - student analytics and weak-topic summaries
 - research evaluation metrics
+- optional stdio MCP tools for authenticated material search, asynchronous question generation, and run status
 - security headers and rate limiting
 - protected administrator user management (create, list, activate/deactivate)
 - authenticated student practice player with scoring and explanations
@@ -34,7 +37,7 @@ The backend currently covers the core academic and assessment workflow:
 ### Prerequisites
 
 - Python 3.13
-- Node.js 18+
+- Node.js v20.19.0+, v22.12.0+, or v24+ (required by Angular CLI 21)
 - MongoDB instance or MongoDB-compatible local service
 
 ### 1) Create and activate the environment
@@ -60,6 +63,12 @@ The default configuration uses:
 - MONGODB_DATABASE=ai_examination_studio
 - JWT_SECRET_KEY must be set for authenticated endpoints
 - LLM_PROVIDER defaults to `deterministic`; set it to `nvidia` and provide `NVIDIA_API_KEY` to use NVIDIA NIM with `moonshotai/kimi-k3`
+- To use Ollama hosted from Kaggle, set `LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL` to the current HTTPS ngrok URL, `OLLAMA_MODEL=qwen2.5:32b`, and adjust `OLLAMA_TIMEOUT_SECONDS` (default 300). The tunnel must forward to Ollama port 11434 and the Kaggle runtime must stay alive. The app calls Ollama's OpenAI-compatible JSON endpoint and does not use streaming because each question is validated as one structured JSON result. Ollama mode is selected directly and does not fall back to OpenRouter.
+- Set `TAVILY_API_KEY` to enable Tavily Search when open-domain question generation has no indexed material matches. In that fallback, the topic is sent to Tavily and result URLs are included as citations.
+- Semantic retrieval is opt-in. Set `RETRIEVAL_EMBEDDING_API_BASE_URL` (the API root, without `/embeddings`), `RETRIEVAL_EMBEDDING_API_KEY`, `RETRIEVAL_EMBEDDING_MODEL`, and the exact `RETRIEVAL_EMBEDDING_DIMENSIONS` returned by the model. Remote embedding endpoints must use HTTPS; `RETRIEVAL_EMBEDDING_TIMEOUT_SECONDS` controls the request timeout (default 30 seconds). Material chunk text and retrieval queries are sent to that configured provider. Leave the URL and key empty to retain local lexical retrieval.
+- Semantic search requires MongoDB Atlas Vector Search (or a MongoDB deployment that supports the same stage). After configuring semantic retrieval, a faculty/admin calls `POST /api/retrieval/vector-index`, waits until `GET /api/retrieval/vector-index` reports `queryable: true`, then re-indexes processed materials through `POST /api/retrieval/materials/{material_id}/index`. The index filters include embedding model and academic scope metadata.
+
+For production rollout, configure Atlas and the embedding provider in the deployment's secret store, create the vector index, and wait for it to become queryable before indexing material. Verify each material reports the expected `indexed_chunk_count`, total `chunk_count`, and embedding model from `GET /api/materials/{material_id}/status`; then exercise representative searches and the scoped retrieval benchmark before routing generation traffic through semantic retrieval. Re-index existing materials after changing embedding model or dimensions. The app does not enable semantic mode just because credentials exist: index creation and material indexing are explicit steps.
 
 ChatGPT Plus is a consumer subscription and does not provide API access automatically. OpenAI API usage requires a separate API key and billing account. The local deterministic provider is therefore the default and requires no external key.
 
@@ -146,13 +155,32 @@ cd backend
 ..\.venv\Scripts\python.exe -m pytest -q
 ```
 
-The current backend test suite passes and covers the implemented phases.
+The backend suite covers authentication, retrieval, generation, evaluation,
+and MCP integration.
 
 Run the deterministic Phase 13 research benchmark from the repository root:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_research_evaluation.py
 ```
+
+Run the Phase 3 generation-quality benchmark against recorded outputs (the
+runner never makes model calls and requires measured per-output durations):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_generation_benchmark.py --results path\to\recorded-results.json
+```
+
+### MCP client integration
+
+An optional local stdio MCP server exposes authenticated `search_materials`,
+`generate_question`, and `get_generation_run` tools. It proxies the existing
+FastAPI endpoints, so normal authentication, role checks, generation quotas,
+and run ownership rules continue to apply. Start the backend and configure a
+client using the steps in [docs/05-AI-RAG.md](docs/05-AI-RAG.md). Supply a
+faculty/admin bearer token through the MCP host's secret environment/input
+mechanism; do not save the token in repository files. Remote API URLs must use
+HTTPS (plain HTTP is permitted only for loopback development).
 
 Run the frontend build and unit tests:
 
@@ -168,6 +196,7 @@ The frontend tests run with Angular's configured Vitest/jsdom builder. Browser-p
 
 - The app follows the roadmap in the project specification documents.
 - The API uses request correlation IDs and structured JSON logging.
+- The Monitoring view reports retrieval and model-call durations, call counts, validation retries, and model failures for new generation runs.
 - Generated content is treated as untrusted and validation remains explicit.
 - Security controls include RBAC, validation, headers, and rate limiting.
 - Pull requests and pushes to `main`/`master` run the repository CI workflow

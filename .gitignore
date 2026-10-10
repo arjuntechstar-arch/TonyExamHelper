@@ -17,3 +17,4 @@ frontend/.angular/
 # Logs
 logs/
 *.log
+/storage/

@@ -1,8 +1,12 @@
+from threading import Barrier
+
 import pytest
 
 from app.models import DocumentChunkDocument, QuestionTemplateDocument
 from app.services.generation import GeneratedQuestion, GenerationError, ProviderRateLimitError, QuestionOption, QuestionSource
 from app.services.question_agents import CriticVerdict, LLMQuestionCriticAgent, QuestionGenerationGraph, select_context_window
+from app.services.generation_decision import JevDecision, JevDecisionAgent, JevDecisionPolicy
+from app.services.quality import ValidationResult
 
 
 def template() -> QuestionTemplateDocument:
@@ -92,11 +96,14 @@ def test_graph_balances_mcq_answer_positions() -> None:
 
 
 def test_hosted_provider_runs_critic_and_independent_solver_before_acceptance() -> None:
+    reviewer_barrier = Barrier(2)
+
     class VerifiedProvider:
         provider_name = "verified-provider"
 
         def generate_structured(self, prompt: str) -> dict:
             if "ROLE|QUESTION_CRITIC" in prompt:
+                reviewer_barrier.wait(timeout=3)
                 return {
                     "grounded": True, "answerable": True, "single_correct_answer": True,
                     "question_complete": True, "distractors_plausible": True, "contains_source_noise": False,
@@ -104,6 +111,7 @@ def test_hosted_provider_runs_critic_and_independent_solver_before_acceptance() 
                     "quality_score": 0.92, "problems": [],
                 }
             if "ROLE|INDEPENDENT_ANSWER_SOLVER" in prompt:
+                reviewer_barrier.wait(timeout=3)
                 return {"answer": "A", "grounded": True, "rationale": "Evidence supports A."}
             return {
                 "question_text": "Which subtree stores smaller values in a binary search tree?",
@@ -115,10 +123,361 @@ def test_hosted_provider_runs_critic_and_independent_solver_before_acceptance() 
                 "difficulty": "Medium", "bloom_level": "Apply", "sources": [{"chunk_id": "chunk-1", "page": 1}],
             }
 
+    trace_events: list[dict] = []
     generated = QuestionGenerationGraph(provider=VerifiedProvider()).generate(
-        template=template(), chunks=chunks(), difficulty="Medium", bloom_level="Apply"
+        template=template(),
+        chunks=chunks(),
+        difficulty="Medium",
+        bloom_level="Apply",
+        trace=lambda message, **kwargs: trace_events.append({"message": message, **kwargs}),
     )
     assert len(generated) == 1
+    assert {event["stage"] for event in trace_events if event.get("duration_ms") is not None} == {
+        "generation_model",
+        "critic_model",
+        "solver_model",
+    }
+    assert sum(
+        event["metric_deltas"]["model_calls"]
+        for event in trace_events
+        if event.get("metric_deltas") and "model_calls" in event["metric_deltas"]
+    ) == 3
+
+
+def test_fast_validation_skips_hosted_review_but_keeps_local_validation() -> None:
+    class GenerationOnlyProvider:
+        provider_name = "generation-only"
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def generate_structured(self, prompt: str) -> dict:
+            self.prompts.append(prompt)
+            return {
+                "question_text": "Which subtree stores smaller values in a binary search tree?",
+                "options": [
+                    {"key": "A", "text": "Left subtree"}, {"key": "B", "text": "Right subtree"},
+                    {"key": "C", "text": "Both subtrees"}, {"key": "D", "text": "Neither subtree"},
+                ],
+                "correct_answer": "A", "explanation": "Smaller values are stored in the left subtree.",
+                "difficulty": "Medium", "bloom_level": "Apply", "sources": [{"chunk_id": "chunk-1", "page": 1}],
+            }
+
+    provider = GenerationOnlyProvider()
+    trace_events: list[dict] = []
+    generated = QuestionGenerationGraph(provider=provider).generate(
+        template=template(),
+        chunks=chunks(),
+        difficulty="Medium",
+        bloom_level="Apply",
+        run_llm_review=False,
+        trace=lambda message, **kwargs: trace_events.append({"message": message, **kwargs}),
+    )
+
+    assert len(generated) == 1
+    assert len(provider.prompts) == 1
+    assert "ROLE|QUESTION_CRITIC" not in provider.prompts[0]
+    assert "ROLE|INDEPENDENT_ANSWER_SOLVER" not in provider.prompts[0]
+    assert any(event.get("stage") == "question_validation" for event in trace_events)
+    assert any(event.get("stage") == "llm_review_skipped" for event in trace_events)
+    jev_event = next(event for event in trace_events if event.get("stage") == "jev_decision")
+    assert jev_event["metric_deltas"]["jev_review_escalations"] == 0
+    assert "evidence confidence" in jev_event["message"]
+
+
+def test_jev_escalates_fast_mode_for_advanced_assessments() -> None:
+    class RiskAwareProvider:
+        provider_name = "risk-aware"
+
+        def __init__(self) -> None:
+            self.roles: list[str] = []
+
+        def generate_structured(self, prompt: str) -> dict:
+            if "ROLE|QUESTION_CRITIC" in prompt:
+                self.roles.append("critic")
+                return {
+                    "grounded": True, "answerable": True, "single_correct_answer": True,
+                    "question_complete": True, "distractors_plausible": True, "contains_source_noise": False,
+                    "bloom_match": True, "difficulty_match": True, "mark_match": True,
+                    "quality_score": 0.92, "problems": [],
+                }
+            if "ROLE|INDEPENDENT_ANSWER_SOLVER" in prompt:
+                self.roles.append("solver")
+                return {"answer": "A", "grounded": True, "rationale": "Evidence supports A."}
+            self.roles.append("generation")
+            return {
+                "question_text": "How does a binary search tree determine whether to place a new value in the left or right subtree?",
+                "options": [
+                    {"key": "A", "text": "Left subtree"}, {"key": "B", "text": "Right subtree"},
+                    {"key": "C", "text": "Both subtrees"}, {"key": "D", "text": "Neither subtree"},
+                ],
+                "correct_answer": "A",
+                "explanation": "Smaller values are stored in the left subtree.",
+                "difficulty": "Hard",
+                "bloom_level": "Analyze",
+                "sources": [{"chunk_id": "chunk-1", "page": 1}],
+            }
+
+    provider = RiskAwareProvider()
+    high_risk_template = template().model_copy(update={
+        "marks": 2,
+        "supported_difficulties": ["Hard"],
+        "supported_bloom_levels": ["Analyze"],
+    })
+    trace_events: list[dict] = []
+
+    generated = QuestionGenerationGraph(provider=provider).generate(
+        template=high_risk_template,
+        chunks=chunks(),
+        difficulty="Hard",
+        bloom_level="Analyze",
+        run_llm_review=False,
+        trace=lambda message, **kwargs: trace_events.append({"message": message, **kwargs}),
+    )
+
+    assert len(generated) == 1
+    assert provider.roles == ["generation", "critic", "solver"]
+    decision_event = next(event for event in trace_events if event.get("stage") == "jev_decision")
+    assert decision_event["metric_deltas"]["jev_review_escalations"] == 1
+    assert "high_difficulty" in decision_event["message"]
+    assert "advanced_bloom_level" in decision_event["message"]
+    assert "multi_mark_question" in decision_event["message"]
+
+
+def test_jev_decision_is_typed_and_low_evidence_escalates() -> None:
+    question = GeneratedQuestion(
+        question_text="What is the color of the sky?",
+        options=[
+            QuestionOption(key="A", text="Blue"), QuestionOption(key="B", text="Green"),
+            QuestionOption(key="C", text="Red"), QuestionOption(key="D", text="Yellow"),
+        ],
+        correct_answer="A",
+        explanation="This is a test answer.",
+        difficulty="Medium",
+        bloom_level="Apply",
+        sources=[QuestionSource(chunk_id="unknown", page=9)],
+    )
+    validation = ValidationResult(
+        valid=True,
+        score=0.7,
+        ranking_score=0.7,
+        similarity=0.0,
+    )
+
+    decision = JevDecisionAgent().decide(
+        question,
+        template=template(),
+        context_chunks=chunks(),
+        validation=validation,
+        strict_review_requested=False,
+    )
+
+    assert isinstance(decision, JevDecision)
+    assert decision.action == "review_with_hosted_checks"
+    assert decision.review_required is True
+    assert decision.evidence_confidence < JevDecisionPolicy().minimum_evidence_confidence
+    assert decision.reasons == ["low_evidence_confidence"]
+
+
+def test_jev_requests_one_more_retrieval_for_low_evidence_fast_candidate() -> None:
+    question = GeneratedQuestion(
+        question_text="What is the color of the sky?",
+        options=[
+            QuestionOption(key="A", text="Blue"), QuestionOption(key="B", text="Green"),
+            QuestionOption(key="C", text="Red"), QuestionOption(key="D", text="Yellow"),
+        ],
+        correct_answer="A",
+        explanation="This is a test answer.",
+        difficulty="Medium",
+        bloom_level="Apply",
+        sources=[QuestionSource(chunk_id="unknown", page=9)],
+    )
+    validation = ValidationResult(valid=True, score=0.7, ranking_score=0.7, similarity=0.0)
+
+    decision = JevDecisionAgent().decide(
+        question,
+        template=template(),
+        context_chunks=chunks(),
+        validation=validation,
+        strict_review_requested=False,
+        allow_retrieval_expansion=True,
+    )
+    strict_decision = JevDecisionAgent().decide(
+        question,
+        template=template(),
+        context_chunks=chunks(),
+        validation=validation,
+        strict_review_requested=True,
+        allow_retrieval_expansion=True,
+    )
+
+    assert decision.action == "retrieve_more_evidence"
+    assert decision.review_required is False
+    assert strict_decision.action == "review_with_hosted_checks"
+    assert strict_decision.review_required is True
+
+
+def test_graph_retrieves_once_then_retries_with_expanded_context() -> None:
+    class ExpansionProvider:
+        provider_name = "expansion-provider"
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def generate_structured(self, prompt: str) -> dict:
+            self.prompts.append(prompt)
+            return {
+                "question_text": "Which subtree stores smaller values in a binary search tree?",
+                "options": [
+                    {"key": "A", "text": "Left subtree"}, {"key": "B", "text": "Right subtree"},
+                    {"key": "C", "text": "Both subtrees"}, {"key": "D", "text": "Neither subtree"},
+                ],
+                "correct_answer": "A",
+                "explanation": "Smaller values are stored in the left subtree.",
+                "difficulty": "Medium",
+                "bloom_level": "Apply",
+                "sources": [{"chunk_id": "chunk-3", "page": 3}],
+            }
+
+    class ExpansionDecisionAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def decide(self, _question, **_kwargs) -> JevDecision:
+            self.calls += 1
+            if self.calls == 1:
+                return JevDecision(
+                    action="retrieve_more_evidence",
+                    evidence_confidence=0.4,
+                    review_required=False,
+                    reasons=["low_evidence_confidence"],
+                )
+            return JevDecision(
+                action="accept_locally",
+                evidence_confidence=0.95,
+                review_required=False,
+                reasons=[],
+            )
+
+    provider = ExpansionProvider()
+    graph = QuestionGenerationGraph(provider=provider)
+    graph.decision_agent = ExpansionDecisionAgent()
+    additional_chunk = {
+        "chunk": DocumentChunkDocument(
+            id="chunk-3",
+            study_material_id="material-1",
+            chunk_index=3,
+            page_number=3,
+            content="A binary search tree stores values smaller than a node in its left subtree.",
+        ),
+        "score": 0.95,
+    }
+    retrieval_calls: list[str] = []
+    trace_events: list[dict] = []
+
+    generated = graph.generate(
+        template=template(),
+        chunks=chunks(),
+        difficulty="Medium",
+        bloom_level="Apply",
+        run_llm_review=False,
+        retrieve_additional_evidence=lambda question: (
+            retrieval_calls.append(question.question_text) or [additional_chunk]
+        ),
+        trace=lambda message, **kwargs: trace_events.append({"message": message, **kwargs}),
+    )
+
+    assert len(generated) == 1
+    assert len(retrieval_calls) == 1
+    assert len(provider.prompts) == 2
+    assert "A binary search tree stores values smaller than a node in its left subtree." in provider.prompts[1]
+    expansion_event = next(event for event in trace_events if event.get("stage") == "jev_retrieval")
+    assert expansion_event["metric_deltas"]["jev_retrieval_expansions"] == 1
+
+
+def test_jev_policy_accepts_grounded_low_risk_fast_question() -> None:
+    source = chunks()[0]["chunk"]
+    question = GeneratedQuestion(
+        question_text="Which subtree stores smaller values in a binary search tree?",
+        options=[
+            QuestionOption(key="A", text="Left subtree"), QuestionOption(key="B", text="Right subtree"),
+            QuestionOption(key="C", text="Both subtrees"), QuestionOption(key="D", text="Neither subtree"),
+        ],
+        correct_answer="A",
+        explanation="Smaller values are stored in the left subtree.",
+        difficulty="Medium",
+        bloom_level="Apply",
+        sources=[QuestionSource(chunk_id=source.id, page=source.page_number)],
+    )
+    validation = ValidationResult(valid=True, score=0.8, ranking_score=0.8, similarity=0.4)
+    decision = JevDecisionAgent().decide(
+        question,
+        template=template(),
+        context_chunks=chunks(),
+        validation=validation,
+        strict_review_requested=False,
+    )
+
+    assert decision.action == "accept_locally"
+    assert decision.review_required is False
+    assert decision.evidence_confidence >= JevDecisionPolicy().minimum_evidence_confidence
+    assert decision.reasons == []
+
+
+def test_jev_escalates_questions_grounded_in_external_web_evidence() -> None:
+    source = chunks()[0]["chunk"].model_copy(update={
+        "metadata": {"source": "web_search"},
+    })
+    question = GeneratedQuestion(
+        question_text="Which subtree stores smaller values in a binary search tree?",
+        options=[
+            QuestionOption(key="A", text="Left subtree"), QuestionOption(key="B", text="Right subtree"),
+            QuestionOption(key="C", text="Both subtrees"), QuestionOption(key="D", text="Neither subtree"),
+        ],
+        correct_answer="A",
+        explanation="Smaller values are stored in the left subtree.",
+        difficulty="Medium",
+        bloom_level="Apply",
+        sources=[QuestionSource(chunk_id=source.id, page=source.page_number)],
+    )
+    decision = JevDecisionAgent().decide(
+        question,
+        template=template(),
+        context_chunks=[{"chunk": source, "score": 1.0}],
+        validation=ValidationResult(valid=True, score=0.8, ranking_score=0.8, similarity=0.4),
+        strict_review_requested=False,
+    )
+
+    assert decision.evidence_confidence >= JevDecisionPolicy().minimum_evidence_confidence
+    assert decision.action == "review_with_hosted_checks"
+    assert decision.reasons == ["external_web_evidence"]
+
+
+def test_jev_always_honors_strict_review_mode() -> None:
+    source = chunks()[0]["chunk"]
+    question = GeneratedQuestion(
+        question_text="Which subtree stores smaller values in a binary search tree?",
+        options=[
+            QuestionOption(key="A", text="Left subtree"), QuestionOption(key="B", text="Right subtree"),
+            QuestionOption(key="C", text="Both subtrees"), QuestionOption(key="D", text="Neither subtree"),
+        ],
+        correct_answer="A",
+        explanation="Smaller values are stored in the left subtree.",
+        difficulty="Medium",
+        bloom_level="Apply",
+        sources=[QuestionSource(chunk_id=source.id, page=source.page_number)],
+    )
+    decision = JevDecisionAgent().decide(
+        question,
+        template=template(),
+        context_chunks=chunks(),
+        validation=ValidationResult(valid=True, score=0.8, ranking_score=0.8, similarity=0.4),
+        strict_review_requested=True,
+    )
+
+    assert decision.action == "review_with_hosted_checks"
+    assert decision.evidence_confidence >= JevDecisionPolicy().minimum_evidence_confidence
+    assert decision.reasons == ["strict_review_requested"]
 
 
 def test_critic_normalizes_a_ten_point_quality_score() -> None:
@@ -330,3 +689,43 @@ def test_graph_generates_ten_pattern_difficulty_bloom_combinations(
     assert generated[0].bloom_level == bloom_level
     if question_type != "MCQ":
         assert generated[0].expected_answer
+
+
+def test_question_progress_uses_paper_offset_and_records_acceptance() -> None:
+    events = []
+    results = QuestionGenerationGraph().generate(
+        template=template(), chunks=chunks(), difficulty="Medium", bloom_level="Apply",
+        candidate_count=2, question_offset=3,
+        trace=lambda message, **kwargs: events.append({"message": message, **kwargs}),
+    )
+    assert len(results) == 2
+    accepted = [event for event in events if event["stage"] == "question_accepted"]
+    assert [event["details"]["question_index"] for event in accepted] == [4, 5]
+    assert all(event["details"]["question_index"] in {4, 5} for event in events)
+
+
+def test_review_timeout_does_not_repeat_network_calls_or_regenerate_candidate() -> None:
+    import httpx
+
+    class TimeoutReviewer:
+        provider_name = "timeout-reviewer"
+
+        def __init__(self):
+            self.calls = []
+
+        def generate_structured(self, prompt):
+            self.calls.append(prompt.splitlines()[0])
+            raise httpx.ReadTimeout("Review timed out")
+
+    provider = TimeoutReviewer()
+    graph = QuestionGenerationGraph(critic_provider=provider, max_attempts_per_question=5)
+    events = []
+    with pytest.raises(GenerationError, match="review service is unavailable"):
+        graph.generate(
+            template=template(), chunks=chunks(), difficulty="Medium", bloom_level="Apply",
+            trace=lambda message, **kwargs: events.append({"message": message, **kwargs}),
+        )
+    assert sorted(provider.calls) == ["ROLE|INDEPENDENT_ANSWER_SOLVER", "ROLE|QUESTION_CRITIC"]
+    assert len([event for event in events if event["stage"] == "preparing"]) == 1
+    assert not any(event["stage"] == "candidate_retry" for event in events)
+    assert any(event["stage"] == "review_unavailable" for event in events)
